@@ -1,0 +1,74 @@
+# AQWA-INUNDATION2D メッシュ作成プロジェクト設定ファイル
+# プロジェクト名: 球磨川・人吉市
+
+project:
+  name: "Tokachi"
+  base_dir: "../01_mkCELL_INUNDATION2D"
+
+# 入力データ設定
+input:
+  # 道路データ（OpenStreetMap）
+  roads:
+    dir: "OpenStreetMap/hokkaido-latest-free.shp"
+    file: "gis_osm_roads_free_1.shp"
+
+  # 建物データ（OpenStreetMap、オプション）
+  buildings:
+    dir: "OpenStreetMap/hokkaido-latest-free.shp"
+    file: "gis_osm_buildings_a_free_1.shp"
+
+  # DEMデータ（標高データ）
+  dem:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "8101080001_十勝川.tif"
+    epsg: 6668
+
+  # 土地利用データ
+  landuse:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "Landuse_100m.tif"
+    epsg: 6668
+
+  # 土壌ラスタ（GeoTIFF）
+  soil:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "japan_soil.tif"
+    epsg: 4326
+
+  # 対象領域ポリゴン
+  target_area:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "input_延伸_v2.gpkg"
+
+  # ダミーメッシュ
+  dummy_mesh:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "none"
+
+# 出力データ設定
+output:
+  dir: "Cell/{project_name}/output_gpkg_csv"  # face.csv, side.csvなどの出力先
+  cell_txt_dir: "Cell/{project_name}"  # cell.binの出力ディレクトリ
+  cell_txt: "{project_name}.bin"  # cell.binのファイル名
+
+# 処理パラメータ
+parameters:
+  merge_small_polygons: false  # 小ポリゴン結合（05_2_2 / 06）
+  area_threshold: 10.0         # hex_area_threshold(auto) 算出の下限 [m²]
+  elevation_stat: "median"     # セル標高の代表値: "mean" or "median"
+  refinement:
+    primary_method: "quadtree_std"   # "hex" | "none" | "quadtree_std"
+    secondary_method: "none"
+    enable_aspect: false
+    qt_mesh_mode: "clip"            # "clip"=道路形状でクリップ | "pure"=正方形 leaf のみ
+    qt_domain: "bbox"             # pure時: "target"=交差 leaf | "bbox"=外接矩形内 leaf 全部
+    hex_diameter: "auto"
+    hex_area_threshold: "auto"
+    hex_area_std_multiplier: 1.0
+    hex_diameter_scale: 1.0
+    qt_root_cell_size: 200.0
+    qt_std_threshold: 0.3
+    qt_relief_threshold: 2.0
+    qt_max_depth: 3
+    qt_min_area: 625.0
+    qt_min_dem_samples: "all"

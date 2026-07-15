@@ -1,0 +1,77 @@
+# AQWA-INUNDATION2D メッシュ作成プロジェクト設定ファイル
+# プロジェクト名: 球磨川・人吉市
+
+project:
+  name: "Kuma_Hitoyoshi"
+  base_dir: "."
+
+# 入力データ設定
+input:
+  # 道路データ（OpenStreetMap）
+  roads:
+    dir: "OpenStreetMap/kyushu-latest-free.shp"
+    file: "gis_osm_roads_free_1.shp"
+
+  # 建物データ（OpenStreetMap、オプション）
+  buildings:
+    dir: "OpenStreetMap/kyushu-latest-free.shp"
+    file: "gis_osm_buildings_a_free_1.shp"
+
+  # DEMデータ（標高データ）
+  dem:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "kuma_5mDEM.tif"
+    epsg: 4326
+
+  # 土地利用データ
+  landuse:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "Landuse_100m.tif"
+    epsg: 6668
+
+  # 土壌ラスタ（GeoTIFF）
+  soil:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "japan_soil.tif"
+    epsg: 4326
+
+  # 対象領域ポリゴン
+  target_area:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "input2.gpkg"
+
+  # ダミーメッシュ
+  dummy_mesh:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "none"
+
+# 出力データ設定
+output:
+  dir: "Cell/{project_name}/output_gpkg_csv"  # face.csv, side.csvなどの出力先
+  cell_txt_dir: "Cell/{project_name}"  # cell.binの出力ディレクトリ
+  cell_txt: "{project_name}.bin"  # cell.binのファイル名
+
+# 処理パラメータ
+parameters:
+  merge_small_polygons: true  # 小ポリゴン結合（05_2_2 / 06）
+  area_threshold: 10.0         # hex_area_threshold(auto) 算出の下限 [m²]
+  elevation_stat: "median"     # セル標高の代表値: "mean" or "median"
+  refinement:
+    enable_aspect: false           # 細長分割オフ（20万面超の aspect 処理を省略）
+    aspect_ratio_threshold: 4.0
+    aspect_min_split_area: 625.0
+    aspect_merge_small: false
+    primary_method: "none"           # quadtree なし（道路 Voronoi のみ、約4千セル）
+    secondary_method: "none"
+    qt_mesh_mode: "clip"
+    qt_domain: "target"
+    hex_diameter: "auto"
+    hex_area_threshold: "auto"
+    hex_area_std_multiplier: 1.0
+    hex_diameter_scale: 1.0
+    qt_root_cell_size: 400.0       # 根セル拡大で分割数削減
+    qt_std_threshold: 0.5          # 分割条件を緩めて leaf 数を抑制
+    qt_relief_threshold: 3.0
+    qt_max_depth: 2                # depth 3 → 2（leaf 約 1/16）
+    qt_min_area: 2500.0            # 最小セル面積拡大
+    qt_min_dem_samples: "all"

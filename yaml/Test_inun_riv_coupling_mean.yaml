@@ -1,0 +1,55 @@
+# AQWA-INUNDATION2D メッシュ作成プロジェクト設定ファイル
+# 検証用: 氾濫・河川連携テスト（標高統計量: 平均値 mean）
+
+project:
+  name: "Test_inun_riv_coupling"
+  base_dir: "."
+
+# 入力データ設定
+input:
+  roads:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "structured_roads.shp"
+  
+  buildings:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: none
+  
+  dem:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "dem.tif"
+    epsg: 2451
+  
+  landuse:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "LandUse_2451.tif"
+    epsg: 2451
+
+  soil:
+    dir: "./"
+    file: "japan_soil.tif"
+    epsg: 4326
+  
+  target_area:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "01.shp"
+  
+  dummy_mesh:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: none
+
+# 出力データ設定
+output:
+  dir: "Cell/{project_name}/output_gpkg_csv"
+  cell_txt_dir: "Cell/{project_name}"
+  cell_txt: "{project_name}.bin"
+
+# パラメータ設定
+parameters:
+  merge_small_polygons: false
+  area_threshold: 10.0
+  elevation_stat: "mean"  # 平均値を使用
+  refinement:
+    primary_method: "none"
+    secondary_method: "none"
+    enable_aspect: false

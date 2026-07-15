@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+__pycache__/
+*.pyc
+
+# 大容量入力データ（各自配置）
+OpenStreetMap/**
+!OpenStreetMap/.gitkeep
+Cell/*/input_gpkg_tif/*.tif
+Cell/*/input_gpkg_tif/*.gpkg
+Landuse_100m.tif
+japan_soil.tif
+*.tif
+*.tif.*
+
+# 生成物
+Cell/*/output_gpkg_csv/
+Cell/*/output_gpkg_csv_pure/
+Cell/*/output_gpkg_25mGrid/
+Cell/*/*.bin
+Cell/*/*.txt
+mesh_generator/output_*/
+
+# エディタ
+.vscode/

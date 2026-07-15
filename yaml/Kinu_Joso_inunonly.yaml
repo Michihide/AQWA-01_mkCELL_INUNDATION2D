@@ -1,0 +1,51 @@
+# AQWA-INUNDATION2D メッシュ作成プロジェクト設定ファイル
+# プロジェクト名: 鬼怒川・常総地区
+
+project:
+  name: "Kinu_Joso_inunonly"
+  base_dir: "."
+
+# 入力データ設定
+input:
+  # 道路データ（OpenStreetMap）
+  roads:
+    dir: "OpenStreetMap/kanto-latest-free.shp"
+    file: "gis_osm_roads_free_1.shp"
+  
+  # 建物データ（OpenStreetMap、オプション）
+  buildings:
+    dir: "OpenStreetMap/kanto-latest-free.shp"
+    file: "gis_osm_buildings_a_free_1.shp"
+  
+  # DEMデータ（標高データ）
+  dem:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "DEM5m2_intprt.tif"
+    epsg: 2451
+  
+  # 土地利用データ
+  landuse:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "LandUse_2451.tif"
+    epsg: 2451
+  
+  # 対象領域ポリゴン
+  target_area:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "01.shp"
+  
+  # ダミーメッシュ
+  dummy_mesh:
+    dir: "Cell/{project_name}/input_gpkg_tif"
+    file: "none"
+
+# 出力データ設定
+output:
+  dir: "Cell/{project_name}/output_gpkg_csv"  # face.csv, side.csvなどの出力先
+  cell_txt_dir: "Cell/{project_name}"  # cell.binの出力ディレクトリ
+  cell_txt: "{project_name}.bin"  # cell.binのファイル名
+
+# パラメータ設定
+parameters:
+  area_threshold: 10.0  # 面積閾値（小さなポリゴンの統合用）
+  elevation_stat: "median"  # 標高統計量: "mean"（平均値）または "median"（中央値）

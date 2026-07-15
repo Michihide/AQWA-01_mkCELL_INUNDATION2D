@@ -1,0 +1,48 @@
+# 地形適合 三角形メッシュ 生成 設定ファイル（サンプル）
+
+input:
+  analysis_area: "data/analysis_area.gpkg"   # 解析対象領域ポリゴン（必須）
+  dem: "data/dem.tif"                          # DEM ラスタ（必須）
+  buildings: "data/buildings.gpkg"             # 建物ポリゴン（任意 / none 可）
+  rivers: "none"                               # 河川ライン（任意）
+  roads: "none"                                # 道路ライン（任意）
+  facilities: "none"                           # 重要施設ポイント（任意）
+
+output:
+  directory: "output_mesh"
+
+crs:
+  auto_utm: true          # 解析領域の重心から UTM を自動推定
+  target_epsg: null       # 明示指定する場合は EPSG 番号（例: 6677）
+  also_write_wgs84: false # WGS84 版 GPKG も出力するか
+
+mesh:
+  min_distance: 5.0               # 最小点間距離 [m]（最小メッシュサイズ）
+  boundary_spacing: 10.0          # 解析領域外周の点間隔 [m]
+  building_boundary_spacing: 5.0  # 建物境界の点間隔 [m]
+  building_buffer: 10.0           # 建物周囲バッファ幅 [m]
+  building_buffer_spacing: 5.0    # バッファ上の点間隔 [m]
+  interior_spacing: 20.0          # 内部規則点の間隔 [m]
+  river_spacing: 10.0             # 河川ラインの点間隔 [m]
+  road_spacing: 10.0              # 道路ラインの点間隔 [m]
+  facility_buffer: 30.0           # 施設周囲バッファ幅 [m]
+  facility_spacing: 10.0          # 施設周囲点の間隔 [m]
+  building_mode: "building_as_roughness"  # building_as_roughness | building_as_hole
+
+elevation:
+  slope_refine: true              # DEM 勾配が大きい領域に追加点を入れる
+  slope_threshold: 0.03           # 勾配しきい値 [-]（rise/run）
+  slope_point_spacing: 10.0       # 勾配評価の格子間隔 [m]
+  z_range_threshold: 0.5          # 標高レンジ細分化しきい値 [m]
+  z_std_threshold: 0.2            # 標高標準偏差細分化しきい値 [m]
+  edge_max_for_refine: 20.0       # この辺長を超え、かつ z_range が下記超で細分化 [m]
+  z_range_for_long_edge: 0.3      # 長辺三角形の z_range しきい値 [m]
+  max_refine_iter: 3              # 反復細分化の最大回数
+  max_add_points_per_iter: 50000  # 1 反復あたりの追加点上限
+  all_touched: false              # 標高統計で境界ピクセルも含めるか
+
+quality:
+  min_edge_length: 5.0    # この辺長未満を警告 [m]
+  min_area: 12.5          # この面積未満を警告 [m^2]
+  min_angle: 20.0         # この最小角未満を警告 [deg]
+  max_aspect_ratio: 8.0   # このアスペクト比超を警告 [-]
