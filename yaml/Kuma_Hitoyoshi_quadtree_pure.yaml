@@ -1,35 +1,33 @@
-# AQWA-INUNDATION2D メッシュ作成プロジェクト設定ファイル
-# プロジェクト名: 球磨川・人吉市
+# 球磨川・人吉市 — quadtree pure（正方形 leaf、道路/建物なし）
 
 project:
-  name: "Kuma_Hitoyoshi"
+  name: "Kuma_Hitoyoshi_quadtree_pure"
   base_dir: "."
 
-# 入力データ設定
 input:
   roads:
     dir: "OpenStreetMap/kyushu-latest-free.shp"
-    file: "gis_osm_roads_free_1.shp"
+    file: "none"
   buildings:
     dir: "OpenStreetMap/kyushu-latest-free.shp"
-    file: "gis_osm_buildings_a_free_1.shp"
+    file: "none"
   dem:
-    dir: "Cell/{project_name}/input_gpkg_tif"
+    dir: "Cell/Kuma_Hitoyoshi/input_gpkg_tif"
     file: "kuma_5mDEM.tif"
     epsg: 4326
   landuse:
-    dir: "Cell/{project_name}/input_gpkg_tif"
+    dir: "Cell/Kuma_Hitoyoshi/input_gpkg_tif"
     file: "Landuse_100m.tif"
     epsg: 6668
   soil:
-    dir: "Cell/{project_name}/input_gpkg_tif"
+    dir: "Cell/Kuma_Hitoyoshi/input_gpkg_tif"
     file: "japan_soil.tif"
     epsg: 4326
   target_area:
-    dir: "Cell/{project_name}/input_gpkg_tif"
+    dir: "Cell/Kuma_Hitoyoshi/input_gpkg_tif"
     file: "input2.gpkg"
   dummy_mesh:
-    dir: "Cell/{project_name}/input_gpkg_tif"
+    dir: "Cell/Kuma_Hitoyoshi/input_gpkg_tif"
     file: "none"
 
 output:
@@ -57,7 +55,7 @@ parameters:
     aspect_merge_small: false
     primary_method: "quadtree_std"
     secondary_method: "none"
-    qt_mesh_mode: "clip"
+    qt_mesh_mode: "pure"
     qt_domain: "target"
     hex_diameter: "auto"
     hex_area_threshold: "auto"
@@ -69,11 +67,3 @@ parameters:
     qt_max_depth: 3
     qt_min_area: 625.0
     qt_min_dem_samples: "all"
-    # 土地利用で最大分割レベルを切替（root=200m 時: depth3=25m, depth2=50m）
-    qt_landuse_depth:
-      enabled: true
-      fine_max_depth: 3
-      coarse_max_depth: 1
-      default_max_depth: 2
-      fine_codes: [70, 91, 92, 150, 160]
-      coarse_codes: [10, 20, 50, 60]

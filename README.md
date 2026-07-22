@@ -30,7 +30,7 @@ AQWA-INUNDATION2D（2次元氾濫解析モデル）用のメッシュデータ�
 - ダミーメッシュ - Shapefile形式（**オプション**）
 
 **出力データ**:
-- `{project_name}.txt` - AQWA-INUNDATION2D用メッシュファイル
+- `{project_name}.bin` - AQWA-INUNDATION2D用メッシュファイル
 - `face.csv` / `face.gpkg` - セル中心データ（標高、土地利用、座標など）
 - `edge.csv` / `edge.gpkg` - セル辺データ（節点座標、標高など）
 - 各種GeoPackageファイル（中間データ）
@@ -39,7 +39,7 @@ AQWA-INUNDATION2D（2次元氾濫解析モデル）用のメッシュデータ�
 
 ## 機能
 
-### 1. メッシュ生成（`01_mkINPUT_Face_Side.py`）
+### 1. メッシュ生成（`01_mkINPUT_Face_Edge.py`）
 
 このスクリプトは、地理空間データからAQWA-INUNDATION2D用のセルメッシュを生成します。
 
@@ -108,7 +108,7 @@ AQWA-INUNDATION2D（2次元氾濫解析モデル）用のメッシュデータ�
 
 ### 2. セルデータ構築（`02_mkCELL.py`）
 
-このスクリプトは、`01_mkINPUT_Face_Edge.py`が生成した`face.csv`と`edge.csv`から、AQWA-INUNDATION2D用の最終メッシュファイル（`{project_name}.txt`）を生成します。
+このスクリプトは、`01_mkINPUT_Face_Edge.py`が生成した`face.csv`と`edge.csv`から、AQWA-INUNDATION2D用の最終メッシュファイル（`{project_name}.bin`）を生成します。
 
 **主な処理内容**:
 
@@ -186,38 +186,20 @@ scipy >= 1.7.0
 
 ## インストール
 
-### 1. Conda環境の作成（推奨）
+### Nix開発環境（推奨）
 
 ```bash
-# 新しいConda環境を作成
-conda create -n AQWA-RISK python=3.10
-
-# 環境をアクティベート
-conda activate AQWA-RISK
+nix develop
 ```
 
-### 2. 必要なライブラリのインストール
+`flake.nix`がPython地理空間ライブラリとnativeビルド用コンパイラを提供します。
 
-```bash
-# GeoPandas（主要な地理空間ライブラリ）
-conda install -c conda-forge geopandas
-
-# Rasterio（ラスタデータ処理）
-conda install -c conda-forge rasterio
-
-# Rasterstats（ゾーン統計）
-conda install -c conda-forge rasterstats
-
-# その他のライブラリ
-conda install -c conda-forge pyyaml scikit-learn scipy pyogrio
-```
-
-### 3. リポジトリのクローン（またはダウンロード）
+### リポジトリのクローン
 
 ```bash
 cd /path/to/your/workspace
 git clone <repository-url>
-cd 01_mkCELL_INUNDATION2D
+cd 01_mkMESH_INUN2DH
 ```
 
 ---
@@ -239,7 +221,7 @@ YAMLファイルを編集し、プロジェクト名と入力データのパス�
 ```yaml
 project:
   name: "Your_Project"
-  base_dir: "/path/to/your/workspace/01_mkCELL_INUNDATION2D"
+  base_dir: "/path/to/your/workspace/01_mkMESH_INUN2DH"
 
 input:
   dem:
@@ -252,8 +234,7 @@ input:
 #### **ステップ2: メッシュデータの生成**
 
 ```bash
-conda activate AQWA-RISK
-python 01_mkINPUT_Face_Edge.py yaml/Your_Project.yaml
+python3 01_mkINPUT_Face_Edge.py yaml/Your_Project.yaml
 ```
 
 **出力**: `Cell/Your_Project/output_gpkg_csv/`に以下のファイルが生成されます
@@ -261,20 +242,19 @@ python 01_mkINPUT_Face_Edge.py yaml/Your_Project.yaml
 - `edge.csv` / `edge.gpkg` - セル辺データ
 - 各種`.gpkg`ファイル（中間データ）
 
-#### **ステップ3: cell.txtの生成**
+#### **ステップ3: cell.binの生成**
 
 ```bash
-python 02_mkCELL.py yaml/Your_Project.yaml
+python3 02_mkCELL.py yaml/Your_Project.yaml
 ```
 
-**出力**: `Cell/Your_Project/Your_Project.txt`（AQWA-INUNDATION2D用メッシュファイル）
+**出力**: `Cell/Your_Project/Your_Project.bin`（AQWA-INUNDATION2D用メッシュファイル）
 
 #### **ステップ4: 一括実行（推奨）**
 
 両方のスクリプトを連続実行する場合:
 
 ```bash
-conda activate AQWA-RISK
 bash run_all.sh yaml/Your_Project.yaml
 ```
 
@@ -283,9 +263,9 @@ bash run_all.sh yaml/Your_Project.yaml
 ## ファイル構成
 
 ```
-01_mkCELL_INUNDATION2D/
+01_mkMESH_INUN2DH/
 ├── 01_mkINPUT_Face_Edge.py     # メッシュ生成スクリプト
-├── 02_mkCELL.py                # cell.txt生成スクリプト
+├── 02_mkCELL.py                # cell.bin生成スクリプト
 ├── run_all.sh                  # 一括実行スクリプト
 ├── README.md                   # このファイル
 │
@@ -296,7 +276,7 @@ bash run_all.sh yaml/Your_Project.yaml
 │
 ├── Cell/                       # プロジェクトデータ
 │   └── {project_name}/
-│       ├── {project_name}.txt              # 最終出力（AQWA用メッシュ）
+│       ├── {project_name}.bin              # 最終出力（AQWA用メッシュ）
 │       ├── input_gpkg_tif/                 # 入力データ
 │       │   ├── DEM5m2_intprt.tif
 │       │   ├── LandUse_2451.tif
@@ -367,8 +347,8 @@ input:
 # 出力データ設定
 output:
   dir: "Cell/{project_name}/output_gpkg_csv"  # CSVとGeoPackageの出力先
-  cell_txt_dir: "Cell/{project_name}"         # cell.txtの出力先
-  cell_txt: "{project_name}.txt"              # cell.txtのファイル名
+  cell_txt_dir: "Cell/{project_name}"         # cell.binの出力先
+  cell_txt: "{project_name}.bin"              # cell.binのファイル名
 
 # パラメータ設定
 parameters:
@@ -382,7 +362,7 @@ parameters:
 
 **例**: `project.name: "Kinu_Joso"`の場合
 - `Cell/{project_name}/input_gpkg_tif` → `Cell/Kinu_Joso/input_gpkg_tif`
-- `{project_name}.txt` → `Kinu_Joso.txt`
+- `{project_name}.bin` → `Kinu_Joso.bin`
 
 ### 標高統計量の選択
 
@@ -400,7 +380,7 @@ parameters:
 
 ## 出力ファイル
 
-### 1. `{project_name}.txt` - AQWA-INUNDATION2D用メッシュファイル
+### 1. `{project_name}.bin` - AQWA-INUNDATION2D用メッシュファイル
 
 **フォーマット**:
 ```
@@ -646,7 +626,7 @@ parameters:
                                   │
                 ┌─────────────────┴─────────────────┐
                 │          出力ファイル             │
-                │  - {project_name}.txt            │
+                │  - {project_name}.bin            │
                 │    (AQWA-INUNDATION2D用)         │
                 └──────────────────────────────────┘
 ```
@@ -663,8 +643,7 @@ parameters:
 
 **解決方法**:
 ```bash
-conda activate AQWA-RISK
-conda install -c conda-forge geopandas rasterio rasterstats
+nix develop
 ```
 
 #### 2. `エラー: 設定ファイルが見つかりません`
@@ -677,7 +656,7 @@ conda install -c conda-forge geopandas rasterio rasterstats
 ls yaml/
 
 # 正しいパスでスクリプトを実行
-python 01_mkINPUT_Face_Side.py yaml/Kinu_Joso.yaml
+python3 01_mkINPUT_Face_Edge.py yaml/Kinu_Joso.yaml
 ```
 
 #### 3. `OSError: Cannot save file into a non-existent directory`
@@ -774,7 +753,7 @@ input:
 - **2025/10**: face.gpkgとedge.gpkgの出力を追加（side→edgeにリネーム）
 - **2024/XX**: YAMLファイルで`{project_name}`プレースホルダーをサポート
 - **2024/XX**: `node_id`ベースの高精度マッチングを実装
-- **2024/XX**: cell.txtの出力先をプロジェクトディレクトリ直下に変更
+- **2024/XX**: cell.binの出力先をプロジェクトディレクトリ直下に変更
 - **2024/XX**: 標高計算を平均値から中央値に変更
 - **2024/XX**: 土地利用面積データの完全保持を実装
 - **2024/XX**: セル辺の循環順整合性チェックを強化

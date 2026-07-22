@@ -123,59 +123,54 @@ def create_lines_from_sides(df_side, df_face):
     node_idを使用して座標の丸め誤差を回避します。
     """
     print(f"\n[3] 辺をラインに変換中...")
-    
-    lines = []
-    
-    # CNでグループ化して各セルを処理
-    for cn, cell_sides in df_side.groupby('CN'):
-        # セル情報を取得
-        cell_info = df_face[df_face['CN'] == cn].iloc[0]
-        
-        # 各セル内でLNごとにグループ化
-        for ln, ln_sides in cell_sides.groupby('LN'):
-            if len(ln_sides) != 2:
-                print(f"   警告: CN={cn}, LN={ln} の辺数が2ではありません（{len(ln_sides)}個）")
-                continue
-            
-            # StartNodeとEndNodeの情報を取得（どちらの行も同じ値を持つはず）
-            start_node_id = int(ln_sides.iloc[0]['StartNode'])
-            end_node_id = int(ln_sides.iloc[0]['EndNode'])
-            peri = int(ln_sides.iloc[0]['ID'])
-            z_cnt = ln_sides.iloc[0]['merge2_mn']
-            
-            # node_idがStartNodeの行を始点、EndNodeの行を終点として取得
-            start_side = ln_sides[ln_sides['node_id'] == start_node_id]
-            end_side = ln_sides[ln_sides['node_id'] == end_node_id]
-            
-            if len(start_side) != 1 or len(end_side) != 1:
-                print(f"   警告: CN={cn}, LN={ln} の始点/終点が正しく取得できません")
-                continue
-            
-            start_side = start_side.iloc[0]
-            end_side = end_side.iloc[0]
-            
-            # ライン情報を作成
-            line = {
-                'CN': cn,
-                'LN': ln,
-                'peri': peri,
-                'CN_end': 0,  # 後で隣接セルを探索して設定
-                'X_bgn': start_side['xcoord'],
-                'Y_bgn': start_side['ycoord'],
-                'X_end': end_side['xcoord'],
-                'Y_end': end_side['ycoord'],
-                'Z_bgn': start_side['merge1_mn'],
-                'Z_end': end_side['merge1_mn'],
-                'Z_cnt': z_cnt,  # 辺の中心の標高（merge2_mn）
-                'node_bgn': start_node_id,
-                'node_end': end_node_id
-            }
-            
-            lines.append(line)
-    
-    df_lines = pd.DataFrame(lines)
+
+    grp_sizes = df_side.groupby(["CN", "LN"]).size()
+    bad = grp_sizes[grp_sizes != 2]
+    if len(bad) > 0:
+        print(f"   警告: 辺数≠2 の CN+LN が {len(bad)} 件")
+        for (cn, ln), count in bad.head(5).items():
+            print(f"   警告: CN={cn}, LN={ln} の辺数が2ではありません（{count}個）")
+
+    valid_keys = grp_sizes[grp_sizes == 2].index
+    sides = df_side.set_index(["CN", "LN"]).loc[valid_keys].reset_index()
+
+    meta = sides.groupby(["CN", "LN"], as_index=False).first()[
+        ["CN", "LN", "StartNode", "EndNode", "ID", "merge2_mn"]
+    ]
+    starts = sides[sides["node_id"] == sides["StartNode"]].drop_duplicates(["CN", "LN"])
+    ends = sides[sides["node_id"] == sides["EndNode"]].drop_duplicates(["CN", "LN"])
+
+    lines = meta.merge(
+        starts[["CN", "LN", "xcoord", "ycoord", "merge1_mn"]],
+        on=["CN", "LN"],
+        how="inner",
+    ).merge(
+        ends[["CN", "LN", "xcoord", "ycoord", "merge1_mn"]],
+        on=["CN", "LN"],
+        how="inner",
+        suffixes=("_start", "_end"),
+    )
+
+    if len(lines) < len(meta):
+        print(f"   警告: 始点/終点が正しく取得できない CN+LN が {len(meta) - len(lines)} 件")
+
+    df_lines = pd.DataFrame({
+        "CN": lines["CN"],
+        "LN": lines["LN"],
+        "peri": lines["ID"].astype(int),
+        "CN_end": 0,
+        "X_bgn": lines["xcoord_start"],
+        "Y_bgn": lines["ycoord_start"],
+        "X_end": lines["xcoord_end"],
+        "Y_end": lines["ycoord_end"],
+        "Z_bgn": lines["merge1_mn_start"],
+        "Z_end": lines["merge1_mn_end"],
+        "Z_cnt": lines["merge2_mn"],
+        "node_bgn": lines["StartNode"].astype(int),
+        "node_end": lines["EndNode"].astype(int),
+    })
     print(f"   作成されたライン数: {len(df_lines)}")
-    
+
     return df_lines
 
 
@@ -225,43 +220,48 @@ def find_adjacent_cells(df_lines):
     （座標の丸め誤差を避けるため）
     """
     print(f"\n[4] 隣接セルを探索中...")
-    
+
     df_lines = df_lines.copy()
-    df_lines['CN_end'] = 0
-    
-    # 内部の辺のみを対象（peri=0）
-    internal_lines = df_lines[df_lines['peri'] == 0].index
-    
-    # node_idペアでインデックスを作成（正規化されたペアを使用）
-    # 正規化: 小さい方のnode_idを先にする
-    node_pair_dict = {}
-    for idx, row in df_lines.iterrows():
-        if row['peri'] == 0:
-            n1, n2 = int(row['node_bgn']), int(row['node_end'])
-            node_pair = (min(n1, n2), max(n1, n2))
-            if node_pair not in node_pair_dict:
-                node_pair_dict[node_pair] = []
-            node_pair_dict[node_pair].append(idx)
-    
-    # 各内部ラインについて、同じnode_idペアを持つ別のセルのラインを探す
-    matched_count = 0
-    for idx in internal_lines:
-        row = df_lines.loc[idx]
-        n1, n2 = int(row['node_bgn']), int(row['node_end'])
-        node_pair = (min(n1, n2), max(n1, n2))
-        
-        if node_pair in node_pair_dict:
-            for match_idx in node_pair_dict[node_pair]:
-                match_row = df_lines.loc[match_idx]
-                
-                # 自分自身ではなく、異なるセルの場合
-                if match_row['CN'] != row['CN']:
-                    df_lines.at[idx, 'CN_end'] = match_row['CN']
-                    matched_count += 1
-                    break
-    
+    df_lines["CN_end"] = 0
+
+    internal = df_lines[df_lines["peri"] == 0]
+    if len(internal) == 0:
+        print("   マッチしたライン数: 0")
+        return df_lines
+
+    pair_min = np.minimum(internal["node_bgn"].astype(int), internal["node_end"].astype(int))
+    pair_max = np.maximum(internal["node_bgn"].astype(int), internal["node_end"].astype(int))
+    internal = internal.assign(_pair_min=pair_min, _pair_max=pair_max)
+
+    pair_cols = ["_pair_min", "_pair_max"]
+    pair_sizes = internal.groupby(pair_cols, sort=False)["CN"].transform("size")
+    normal = internal[pair_sizes == 2].copy()
+    if len(normal):
+        pair_sum = normal.groupby(pair_cols, sort=False)["CN"].transform("sum")
+        other_cn = pair_sum - normal["CN"]
+        different = other_cn != normal["CN"]
+        df_lines.loc[normal.index[different], "CN_end"] = (
+            other_cn[different].astype(np.int64).to_numpy()
+        )
+
+    # Degenerate node pairs are rare. Preserve the old first-different-CN
+    # semantics only for those groups instead of looping over every edge.
+    exceptional = internal[pair_sizes > 2]
+    exceptional_matches = {}
+    for _, grp in exceptional.groupby(pair_cols, sort=False):
+        cns = grp["CN"].to_numpy()
+        indices = grp.index.to_numpy()
+        for pos, idx in enumerate(indices):
+            matches = np.flatnonzero(cns != cns[pos])
+            if matches.size:
+                exceptional_matches[idx] = int(cns[matches[0]])
+    if exceptional_matches:
+        idx = list(exceptional_matches)
+        df_lines.loc[idx, "CN_end"] = [exceptional_matches[i] for i in idx]
+
+    matched_count = int((df_lines["CN_end"] != 0).sum())
     print(f"   マッチしたライン数: {matched_count}")
-    
+
     return df_lines
 
 
@@ -275,32 +275,33 @@ def sort_lines_counterclockwise(cell_lines):
     if len(cell_lines) == 0:
         return cell_lines
     
-    # 最初の辺を選択（どれでもOK）
-    sorted_lines = [cell_lines.iloc[0]]
-    remaining = cell_lines.iloc[1:].copy()
-    
-    # 残りの辺を順番に繋げていく
-    while len(remaining) > 0:
-        current_line = sorted_lines[-1]
-        current_end = current_line['node_end']
-        
-        # 現在の辺の終点が始点になっている辺を探す
-        next_line = remaining[remaining['node_bgn'] == current_end]
-        
-        if len(next_line) == 0:
-            # 連続する辺が見つからない場合（エラー）
-            print(f"   警告: CN={current_line['CN']} で連続する辺が見つかりません")
-            # 残りの辺をそのまま追加
-            sorted_lines.extend([remaining.iloc[i] for i in range(len(remaining))])
+    starts = cell_lines["node_bgn"].to_numpy()
+    ends = cell_lines["node_end"].to_numpy()
+    by_start = {}
+    for pos, node in enumerate(starts):
+        by_start.setdefault(node, []).append(pos)
+
+    used = np.zeros(len(cell_lines), dtype=bool)
+    used[0] = True
+    order = [0]
+    while len(order) < len(cell_lines):
+        current_end = ends[order[-1]]
+        next_pos = next(
+            (pos for pos in by_start.get(current_end, ()) if not used[pos]),
+            None,
+        )
+        if next_pos is None:
+            remaining = np.flatnonzero(~used).tolist()
+            print(
+                f"   警告: CN={cell_lines.iloc[order[-1]]['CN']} "
+                "で連続する辺が見つかりません"
+            )
+            order.extend(remaining)
             break
-        
-        # 見つかった辺を追加
-        next_line_idx = next_line.index[0]
-        sorted_lines.append(remaining.loc[next_line_idx])
-        remaining = remaining.drop(next_line_idx)
-    
-    # DataFrameに変換
-    return pd.DataFrame(sorted_lines).reset_index(drop=True)
+        used[next_pos] = True
+        order.append(next_pos)
+
+    return cell_lines.iloc[order].reset_index(drop=True)
 
 
 def write_cell_bin(df_face, df_lines, output_path, face_gpkg_path, edge_gpkg_path):
@@ -333,19 +334,14 @@ def write_cell_bin(df_face, df_lines, output_path, face_gpkg_path, edge_gpkg_pat
     """
     print(f"\n[5] cell.bin（バイナリ）を出力中...")
 
-    face_dict   = df_face.set_index('CN').to_dict('index')
-    sorted_cns  = sorted(df_face['CN'].unique())
-
-    # CCW 順ラインデータをキャッシュ（face ループを2回回さないため）
-    cell_lines_cache = {}
-    for cn in sorted_cns:
-        cell_lines_cache[cn] = sort_lines_counterclockwise(
-            df_lines[df_lines['CN'] == cn]
-        )
+    face_dict = df_face.set_index('CN').to_dict('index')
+    sorted_cns = sorted(df_face['CN'].unique())
+    # Build the CN index once. The former per-face boolean filter was O(F×L).
+    line_indices_by_cn = df_lines.groupby('CN', sort=False).indices
 
     # ヘッダー用集計値を事前計算
     total_face       = len(sorted_cns)
-    total_edge       = sum(len(cell_lines_cache[cn]) for cn in sorted_cns)
+    total_edge       = len(df_lines)
     total_face_index = sum(1 for cn in sorted_cns if int(face_dict[cn]['CalMesh']) != 1)
 
     def pad_path(path_str, length=1000):
@@ -359,54 +355,48 @@ def write_cell_bin(df_face, df_lines, output_path, face_gpkg_path, edge_gpkg_pat
         f.write(pad_path(edge_gpkg_path))                             # 1000 bytes
         f.write(struct.pack('<iii', total_face, total_edge, total_face_index))  # 12 bytes
 
+        face_struct = struct.Struct('<ii6d13d17di')
+        edge_struct = struct.Struct('<iiii7dii10d')
+
         # ---- セルレコード ----
         for cn in sorted_cns:
             cell_info  = face_dict[cn]
-            cell_lines = cell_lines_cache[cn]
+            positions = line_indices_by_cn.get(cn)
+            if positions is None:
+                cell_lines = df_lines.iloc[0:0]
+            else:
+                cell_lines = sort_lines_counterclockwise(df_lines.iloc[positions])
             ln_count   = len(cell_lines)
             calc_mesh  = int(cell_info['CalMesh'])
-
-            # 整数 2 値: face_number, total_edge_in_face
-            f.write(struct.pack('<ii', cn, ln_count))
-
-            # 実数 6 値: x, y, A, bl(標高), bld_ratio, bld_peri
-            f.write(struct.pack('<6d',
+            record = bytearray(face_struct.pack(
+                cn,
+                ln_count,
                 float(cell_info['xcoord']),
                 float(cell_info['ycoord']),
                 float(cell_info['area']),
                 float(cell_info['_median']),
                 float(cell_info['ratio']),
-                float(cell_info.get('bill_perimeter', 0.0))
+                float(cell_info.get('bill_perimeter', 0.0)),
+                *[float(cell_info.get(lc, 0.0)) for lc in LANDUSE_CODES],
+                *[float(cell_info.get(f"soil_{sc}_area", 0.0)) for sc in SOIL_CODES],
+                calc_mesh,
             ))
-
-            # 実数 13 値: 土地利用面積（Fortran 変数宣言順の固定コード）
-            f.write(struct.pack('<13d',
-                *[float(cell_info.get(lc, 0.0)) for lc in LANDUSE_CODES]
-            ))
-
-            # 実数 17 値: 土壌面積（soil_1_area .. soil_17_area）
-            f.write(struct.pack('<17d',
-                *[float(cell_info.get(f"soil_{sc}_area", 0.0)) for sc in SOIL_CODES]
-            ))
-
-            # 整数 1 値: dummy_face (CalMesh)
-            f.write(struct.pack('<i', calc_mesh))
 
             # ---- 辺レコード（このセルの辺を連続して格納）----
-            for _, line in cell_lines.iterrows():
-                ln     = int(line['LN'])
-                peri   = int(line['peri'])
-                cn_bgn = int(line['CN'])
-                cn_end = int(line['CN_end'])
+            for line in cell_lines.itertuples(index=False):
+                ln     = int(line.LN)
+                peri   = int(line.peri)
+                cn_bgn = int(line.CN)
+                cn_end = int(line.CN_end)
 
-                x_bgn = float(line['X_bgn']); y_bgn = float(line['Y_bgn']); z_bgn = float(line['Z_bgn'])
-                x_end = float(line['X_end']); y_end = float(line['Y_end']); z_end = float(line['Z_end'])
+                x_bgn = float(line.X_bgn); y_bgn = float(line.Y_bgn); z_bgn = float(line.Z_bgn)
+                x_end = float(line.X_end); y_end = float(line.Y_end); z_end = float(line.Z_end)
                 x_cnt = (x_bgn + x_end) / 2.0
                 y_cnt = (y_bgn + y_end) / 2.0
-                z_cnt = float(line['Z_cnt'])
+                z_cnt = float(line.Z_cnt)
 
-                node_bgn    = int(line['node_bgn'])
-                node_end    = int(line['node_end'])
+                node_bgn    = int(line.node_bgn)
+                node_end    = int(line.node_end)
                 edge_length = float(np.sqrt((x_end - x_bgn)**2 + (y_end - y_bgn)**2))
 
                 cell_bgn_info    = face_dict[cn_bgn]
@@ -444,22 +434,17 @@ def write_cell_bin(df_face, df_lines, output_path, face_gpkg_path, edge_gpkg_pat
                 weight_cnt = (1.0 / dist_bgn_to_cnt) / (1.0 + 1.0 / dist_bgn_to_cnt) \
                              if dist_bgn_to_cnt > 1e-10 else 1.0
 
-                # 整数 4 値: en, bc_flag, fn_self, fn_adj
-                f.write(struct.pack('<iiii', ln, peri, cn_bgn, cn_end))
-                # 実数 7 値: A_CV_edge, dl, dxdl, dydl, weight_self, weight_adj, weight_face
-                f.write(struct.pack('<7d',
+                record.extend(edge_struct.pack(
+                    ln, peri, cn_bgn, cn_end,
                     total_area, DL, cos_x, cos_y,
-                    weight_bgn, weight_end, weight_cnt
-                ))
-                # 整数 2 値: vertex_number_st, vertex_number_en
-                f.write(struct.pack('<ii', node_bgn, node_end))
-                # 実数 10 値: x_vertex_st..edge_length
-                f.write(struct.pack('<10d',
+                    weight_bgn, weight_end, weight_cnt,
+                    node_bgn, node_end,
                     x_bgn, y_bgn, z_bgn,
                     x_end, y_end, z_end,
                     x_cnt, y_cnt, z_cnt,
-                    edge_length
+                    edge_length,
                 ))
+            f.write(record)
 
     print(f"   ✅ cell.bin（バイナリ）を出力しました: {output_path}")
     print(f"   総セル数: {total_face}")

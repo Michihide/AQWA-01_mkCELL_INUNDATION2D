@@ -1,5 +1,5 @@
 # 三角形メッシュ生成 設定（Hii プロジェクト）
-# プロジェクトルート（01_mkCELL_INUNDATION2D）から実行する想定でパスを記述。
+# プロジェクトルート（01_mkMESH_INUN2DH）から実行する想定でパスを記述。
 
 input:
   analysis_area: "Cell/Hii/input_gpkg_tif/input_gpkg2.gpkg"  # EPSG:6671

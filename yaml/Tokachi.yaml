@@ -3,7 +3,7 @@
 
 project:
   name: "Tokachi"
-  base_dir: "../01_mkCELL_INUNDATION2D"
+  base_dir: "../01_mkMESH_INUN2DH"
 
 # 入力データ設定
 input:

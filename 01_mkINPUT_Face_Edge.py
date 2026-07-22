@@ -16,7 +16,6 @@ TACM (Two-dimensional Analysis of Current and Wave) グリッド生成用
 """
 
 import os
-os.environ["OMP_NUM_THREADS"] = "8"  # OpenMPの並列処理を1スレッドに制限
 
 # 地理空間データ処理ライブラリ
 import geopandas as gpd
@@ -45,6 +44,7 @@ import rasterio
 import rasterio.features
 import rasterio.mask
 from rasterio import windows
+from rasterio.errors import WindowError
 from rasterio import mask as rio_mask
 from rasterio.transform import rowcol
 from rasterio.features import geometry_mask
@@ -67,6 +67,17 @@ from sklearn.cluster import KMeans
 from pathlib import Path
 import argparse
 import sys
+import time
+
+from mkcell_block import block_output_dir, load_target_blocks, read_vector_bbox
+from mkcell_timing import record as timing_record
+from mkcell_timing import stage, summary as timing_summary
+
+try:
+    import mkcell_native as _mknative
+    MKCELL_NATIVE_AVAILABLE = _mknative.load_native() is not None
+except Exception:
+    MKCELL_NATIVE_AVAILABLE = False
 
 # ============================================================================
 # 再現性（決定性）の確保
@@ -100,8 +111,21 @@ parser.add_argument(
     type=str,
     help='設定ファイル（YAMLファイル）のパス（例: yaml/Kinu_Joso.yaml）'
 )
+parser.add_argument(
+    '--block-index',
+    type=int,
+    default=None,
+    help='input2.gpkg の行番号で単一氾濫ブロックのみ処理'
+)
+parser.add_argument(
+    '--min-block-area-m2',
+    type=float,
+    default=None,
+    help='極小ブロック除外閾値 [m²]（YAML parallel.min_block_area_m2 より優先）'
+)
 
 args = parser.parse_args()
+_pipeline_t0 = time.perf_counter()
 
 # 設定ファイルの存在確認
 config_path = Path(args.config_file)
@@ -135,6 +159,27 @@ def replace_project_name(obj, project_name):
         return obj
 
 config = replace_project_name(config, project_name)
+
+parallel_cfg = config.get("parallel", {})
+params_cfg = config.get("parameters", {})
+native_cfg = params_cfg.get("native", {})
+raster_area_mode = str(params_cfg.get("raster_area_mode", "fast")).lower()
+use_native = bool(native_cfg.get("enabled", True)) and MKCELL_NATIVE_AVAILABLE
+if use_native:
+    omp_threads = int(native_cfg.get("omp_threads", 4))
+    os.environ["OMP_NUM_THREADS"] = str(omp_threads)
+    print(f"Native acceleration: enabled (OMP_NUM_THREADS={omp_threads})")
+else:
+    print("Native acceleration: disabled or library not built")
+print(f"Raster area mode: {raster_area_mode}")
+block_index = args.block_index
+min_block_area_m2 = (
+    args.min_block_area_m2
+    if args.min_block_area_m2 is not None
+    else float(parallel_cfg.get("min_block_area_m2", 100.0))
+)
+if block_index is not None:
+    print(f"ブロックモード: block_index={block_index}, min_block_area_m2={min_block_area_m2}")
 
 # 入力ファイルパスの構築
 # 道路データ（"none" の場合は道路処理をスキップしシンプル分割モード）
@@ -231,6 +276,35 @@ if qt_domain not in {"target", "bbox"}:
     print(f"警告: qt_domain='{qt_domain}' は未対応です。'target' を使用します。")
     qt_domain = "target"
 
+
+def _parse_qt_landuse_depth_config(refinement_cfg, fallback_max_depth):
+    """土地利用に応じた quadtree max_depth 設定を解析する。"""
+    raw = refinement_cfg.get("qt_landuse_depth")
+    if not raw or not bool(raw.get("enabled", False)):
+        return None
+
+    fine_max_depth = int(raw.get("fine_max_depth", fallback_max_depth))
+    coarse_max_depth = int(raw.get("coarse_max_depth", max(0, fallback_max_depth - 1)))
+    default_max_depth = int(raw.get("default_max_depth", coarse_max_depth))
+    fine_codes = {int(c) for c in raw.get("fine_codes", [70, 91, 92, 150, 160])}
+    coarse_codes = {int(c) for c in raw.get("coarse_codes", [10, 20, 50, 60])}
+    overlap = fine_codes & coarse_codes
+    if overlap:
+        raise ValueError(
+            f"qt_landuse_depth: fine_codes と coarse_codes が重複しています: {sorted(overlap)}"
+        )
+    return {
+        "fine_max_depth": fine_max_depth,
+        "coarse_max_depth": coarse_max_depth,
+        "default_max_depth": default_max_depth,
+        "fine_codes": fine_codes,
+        "coarse_codes": coarse_codes,
+        "global_max_depth": max(fine_max_depth, coarse_max_depth, default_max_depth),
+    }
+
+
+qt_landuse_depth_config = _parse_qt_landuse_depth_config(refinement, qt_max_depth)
+
 # 分割手法の設定を検証（未知の値は安全側で既定値へフォールバック）
 if primary_refine_method not in {"hex", "none", "quadtree_std"}:
     print(f"警告: primary_method='{primary_refine_method}' は未対応です。'hex' を使用します。")
@@ -260,9 +334,20 @@ print(f"hex_diameter={hex_diameter}, hex_area_threshold={hex_area_threshold}")
 if primary_refine_method == "quadtree_std":
     print(f"quadtree: std>{qt_std_threshold}, relief>{qt_relief_threshold}, max_depth={qt_max_depth}, min_area={qt_min_area}, min_samples={qt_min_dem_samples}")
     print(f"quadtree mesh_mode={qt_mesh_mode}, domain={qt_domain}")
+    if qt_landuse_depth_config is not None:
+        lu = qt_landuse_depth_config
+        print(
+            f"quadtree landuse depth: fine={lu['fine_max_depth']} "
+            f"(codes={sorted(lu['fine_codes'])}), "
+            f"coarse={lu['coarse_max_depth']} "
+            f"(codes={sorted(lu['coarse_codes'])}), "
+            f"default={lu['default_max_depth']}"
+        )
 
 # 出力フォルダ設定
 output_folder = os.path.join(base_dir, config["output"]["dir"])
+if block_index is not None:
+    output_folder = block_output_dir(output_folder, block_index)
 input_dem = os.path.abspath(os.path.expanduser(DEM_directory))
 
 # 出力フォルダの作成（存在しない場合）
@@ -270,7 +355,11 @@ os.makedirs(output_folder, exist_ok=True)
 print(f"出力ディレクトリ: {output_folder}")
 
 # 対象領域ポリゴンファイルの読み込み
-input_gdf = gpd.read_file(input_file)  # GeoDataFrameとして読み込み
+with stage("load_target_blocks"):
+    input_gdf, _n_blocks, _valid_block_indices = load_target_blocks(
+        input_file, block_index=block_index, min_block_area_m2=min_block_area_m2
+    )
+block_bbox = tuple(input_gdf.total_bounds)
 
 # ============================================================================
 # フェーズ1: 基礎ライン作成と道路網の統合 (02-04)
@@ -362,41 +451,58 @@ def process_line_to_polygons(line_gdf: gpd.GeoDataFrame, snap_tol=0.05) -> gpd.G
     return gpd.GeoDataFrame(geometry=poly, crs=line_gdf.crs)
 
 # 02-04: 道路網の統合（roads.file=none の場合はスキップ）
+_phase_t0 = time.perf_counter()
 if enable_roads:
     # 02: 対象領域の境界線を作成
     Line02 = gpd.GeoDataFrame(geometry=input_gdf.boundary, crs=input_gdf.crs)
     print('02: ', Line02.geom_type.value_counts())
 
     # 03: 道路データのクリップ処理
-    input_OSM = gpd.read_file(OSM_directory)
-    input_OSM = input_OSM.to_crs(input_gdf.crs)
+    with stage("load_osm_roads"):
+        if block_index is not None:
+            input_OSM = read_vector_bbox(OSM_directory, block_bbox, input_gdf.crs)
+        else:
+            input_OSM = gpd.read_file(OSM_directory)
+            input_OSM = input_OSM.to_crs(input_gdf.crs)
     Line03 = gpd.overlay(input_OSM, input_gdf, how='intersection')
     print('03: ', Line03.geom_type.value_counts())
 
-    # 04: 境界線と道路網の統合
-    Line04 = gpd.overlay(Line02, Line03, how='union', keep_geom_type=False)
-    Line04 = Line04[~Line04.geom_type.isin(['Point', 'MultiPoint'])]
-    Line04 = Line04[~Line04.geom_type.isin(['GeometryCollection'])]
+    if len(Line03) == 0:
+        print("Warning: OSM×領域の交差が空のため、対象領域ポリゴンをそのまま使用します。")
+        Poly05 = input_gdf.copy()
+    else:
+        # 04: 境界線と道路網の統合
+        Line04 = gpd.overlay(Line02, Line03, how='union', keep_geom_type=False)
+        Line04 = Line04[~Line04.geom_type.isin(['Point', 'MultiPoint'])]
+        Line04 = Line04[~Line04.geom_type.isin(['GeometryCollection'])]
 
-    invalid_geoms = Line04[~Line04.is_valid]
-    print(f"無効なジオメトリの数: {len(invalid_geoms)}")
-    Line04 = Line04[Line04.is_valid]
+        if len(Line04) == 0 or Line04.geometry.is_empty.all():
+            print("Warning: 道路クリップ結果が空のため、対象領域ポリゴンをそのまま使用します。")
+            Poly05 = input_gdf.copy()
+        else:
+            invalid_geoms = Line04[~Line04.is_valid]
+            print(f"無効なジオメトリの数: {len(invalid_geoms)}")
+            Line04 = Line04[Line04.is_valid]
 
-    tree = STRtree(Line04.geometry)
-    tolerance = 0.1
+            tree = STRtree(Line04.geometry)
+            tolerance = 0.1
 
-    def snap_to_nearest(geom):
-        nearby = tree.query(geom.buffer(tolerance))
-        nearby_geoms = [tree.geometries[i] for i in nearby if tree.geometries[i].is_valid]
-        if len(nearby_geoms) == 0:
-            return geom
-        unioned = unary_union(nearby_geoms)
-        return snap(geom, unioned, tolerance)
+            def snap_to_nearest(geom):
+                nearby = tree.query(geom.buffer(tolerance))
+                nearby_geoms = [tree.geometries[i] for i in nearby if tree.geometries[i].is_valid]
+                if len(nearby_geoms) == 0:
+                    return geom
+                unioned = unary_union(nearby_geoms)
+                return snap(geom, unioned, tolerance)
 
-    Line04['geometry'] = Line04['geometry'].apply(snap_to_nearest)
-    print('04: ', Line04.geom_type.value_counts())
+            Line04['geometry'] = Line04['geometry'].apply(snap_to_nearest)
+            print('04: ', Line04.geom_type.value_counts())
 
-    Poly05 = process_line_to_polygons(Line04)
+            try:
+                Poly05 = process_line_to_polygons(Line04)
+            except ValueError as exc:
+                print(f"Warning: polygonize 失敗 ({exc}); 対象領域ポリゴンを使用します。")
+                Poly05 = input_gdf.copy()
 else:
     print("02-04: 道路処理をスキップ。対象領域ポリゴンをそのまま使用します。")
     Poly05 = input_gdf.copy()
@@ -615,6 +721,7 @@ if primary_refine_method == "quadtree_std":
 Poly05_3 = Poly05_2_2[Poly05_2_2.geometry.area > hex_area_threshold]
 # Poly05_3.to_file(f"{output_folder}/05_3_Poly.gpkg", layer='poly', driver="GPKG")
 print('05_3: ',Poly05_3.geom_type.value_counts()) # ジオメトリタイプを確認
+timing_record("road_polygonize", time.perf_counter() - _phase_t0)
 
 # ============================================================================
 # フェーズ3: ヘキサゴングリッドによる大面積ポリゴンの分割 (05_4)
@@ -970,6 +1077,13 @@ def _band_dem_stats(band, nodata_value):
 
 def _slab_dem_stats(slab, valid_slab, domain_slab, nodata_value, need_relief=True):
     """メモリ上の DEM スライスから統計量を計算。"""
+    if use_native:
+        result = _mknative.slab_dem_stats(slab, valid_slab, domain_slab, nodata_value, need_relief)
+        if result is not None:
+            std_val = result["std"]
+            relief_val = result["relief"] if need_relief else None
+            return std_val, relief_val, result["count"], result["full_cover"]
+
     if np.issubdtype(slab.dtype, np.floating):
         valid = valid_slab & (slab != nodata_value) & (~np.isnan(slab))
     else:
@@ -1045,6 +1159,12 @@ class _QuadtreeDemContext:
         )
         self._init_valid_mask()
         print("quadtree DEM 準備完了", flush=True)
+        if self._needs_transform:
+            self._from_raster = Transformer.from_crs(raster_crs, work_crs, always_xy=True).transform
+        else:
+            self._from_raster = None
+        self.raster_crs = raster_crs
+        self.work_crs = work_crs
 
     def _init_valid_mask(self):
         raw = self.array
@@ -1101,22 +1221,188 @@ class _QuadtreeDemContext:
             domain_slab = self.domain_mask[r0:r1, c0:c1]
 
             std_val, relief_val, n, full_cover = _slab_dem_stats(
-                slab, valid_slab, domain_slab, self.nodata, need_relief=False
+                slab, valid_slab, domain_slab, self.nodata, need_relief=True
             )
-            if (
-                std_val is not None
-                and std_val <= std_threshold
-                and relief_threshold is not None
-                and n > 0
-            ):
-                vals = slab[valid_slab]
-                if vals.size > 0:
-                    relief_val = float(np.percentile(vals, 95) - np.percentile(vals, 5))
-
             result = (std_val, relief_val, n, full_cover)
 
         self.cache[key] = result
         return result
+
+
+class _QuadtreeLanduseContext:
+    """quadtree セル単位の土地利用コード（ラスタ多数決）を返す。"""
+
+    @classmethod
+    def try_open(cls, src, work_crs, bounds_xy):
+        """読込に失敗した場合は None を返す（global max_depth へフォールバック）。"""
+        try:
+            return cls(src, work_crs, bounds_xy)
+        except (ValueError, WindowError) as exc:
+            print(
+                f"Warning: quadtree 土地利用ラスタを読めません ({exc}); "
+                "global max_depth を使用します。",
+                flush=True,
+            )
+            return None
+
+    @staticmethod
+    def _window_for_bounds(src, left, bottom, right, top):
+        """ラスタ上の読込 window を返す。極小ブロックでは 1px 以上になるよう拡張。"""
+        pixel_w = max(abs(src.transform.a), 1e-12)
+        pixel_h = max(abs(src.transform.e), 1e-12)
+        if right - left < pixel_w:
+            cx = 0.5 * (left + right)
+            left = cx - pixel_w
+            right = cx + pixel_w
+        if top - bottom < pixel_h:
+            cy = 0.5 * (bottom + top)
+            bottom = cy - pixel_h
+            top = cy + pixel_h
+
+        win = windows.from_bounds(left, bottom, right, top, src.transform)
+        win = win.round_offsets().round_lengths()
+        if win.width <= 0 or win.height <= 0:
+            raise ValueError(
+                f"土地利用 window が空です (width={win.width}, height={win.height})"
+            )
+        try:
+            win = win.intersection(windows.Window(0, 0, src.width, src.height))
+        except WindowError as exc:
+            raise ValueError(f"土地利用 window がラスタ外です: {exc}") from exc
+        if win.width <= 0 or win.height <= 0:
+            raise ValueError("土地利用 window とラスタの交差が空です")
+        return win
+
+    def __init__(self, src, work_crs, bounds_xy):
+        self.cache = {}
+        raster_crs = src.crs
+        self._needs_transform = (
+            work_crs is not None
+            and raster_crs is not None
+            and not CRS(work_crs).equals(CRS(raster_crs))
+        )
+        if self._needs_transform:
+            self._to_raster = Transformer.from_crs(work_crs, raster_crs, always_xy=True).transform
+        else:
+            self._to_raster = None
+
+        xmin, ymin, xmax, ymax = bounds_xy
+        pixel_size = max(abs(src.transform.a), abs(src.transform.e), 1.0)
+        pad = max(pixel_size * 2.0, pixel_size)
+        if self._to_raster is not None:
+            rx, ry = self._to_raster(
+                [xmin - pad, xmax + pad, xmax + pad, xmin - pad],
+                [ymin - pad, ymin - pad, ymax + pad, ymax + pad],
+            )
+            left, right = float(min(rx)), float(max(rx))
+            bottom, top = float(min(ry)), float(max(ry))
+        else:
+            left, bottom, right, top = xmin - pad, ymin - pad, xmax + pad, ymax + pad
+
+        win = self._window_for_bounds(src, left, bottom, right, top)
+        self.array = src.read(1, window=win)
+        self.transform = windows.transform(win, src.transform)
+        self.nodata = src.nodata if src.nodata is not None else 0
+        h, w = self.array.shape
+        print(
+            f"quadtree 土地利用読込: {w}×{h} px ({self.array.nbytes / 1e6:.1f} MB)",
+            flush=True,
+        )
+
+    def _work_bounds_to_slice(self, minx, miny, maxx, maxy):
+        if self._to_raster is not None:
+            rx, ry = self._to_raster(
+                [minx, maxx, maxx, minx],
+                [miny, miny, maxy, maxy],
+            )
+        else:
+            rx, ry = [minx, maxx, maxx, minx], [miny, miny, maxy, maxy]
+
+        rows, cols = rowcol(self.transform, rx, ry)
+        row0 = max(0, min(rows))
+        row1 = min(self.array.shape[0], max(rows) + 1)
+        col0 = max(0, min(cols))
+        col1 = min(self.array.shape[1], max(cols) + 1)
+        if row1 <= row0 or col1 <= col0:
+            return None
+        return row0, row1, col0, col1
+
+    def majority_code_for_bounds(self, minx, miny, maxx, maxy):
+        sl = self._work_bounds_to_slice(minx, miny, maxx, maxy)
+        if sl is None:
+            return None
+        r0, r1, c0, c1 = sl
+        slab = self.array[r0:r1, c0:c1]
+        if slab.size == 0:
+            return None
+        vals = slab.astype(np.int64, copy=False).ravel()
+        if np.issubdtype(slab.dtype, np.floating):
+            valid = (~np.isnan(slab.ravel()))
+            if self.nodata is not None:
+                valid &= vals != int(self.nodata)
+        else:
+            valid = np.ones(vals.shape, dtype=bool)
+            if self.nodata is not None:
+                valid &= vals != int(self.nodata)
+        vals = vals[valid]
+        if vals.size == 0:
+            return None
+        counts = np.bincount(vals)
+        return int(np.argmax(counts))
+
+    def majority_code_for_key(self, origin_x, origin_y, base_cell, level, i, j):
+        cache_key = (level, i, j)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        step = base_cell / (2 ** level)
+        code = self.majority_code_for_bounds(
+            origin_x + i * step,
+            origin_y + j * step,
+            origin_x + (i + 1) * step,
+            origin_y + (j + 1) * step,
+        )
+        self.cache[cache_key] = code
+        return code
+
+
+def _quadtree_max_depth_for_key(
+    landuse_ctx,
+    origin_x,
+    origin_y,
+    base_cell,
+    level,
+    i,
+    j,
+    landuse_depth_config,
+    fallback_max_depth,
+):
+    """セル中心付近の土地利用から max_depth を決める。"""
+    if landuse_depth_config is None or landuse_ctx is None:
+        return fallback_max_depth
+    code = landuse_ctx.majority_code_for_key(origin_x, origin_y, base_cell, level, i, j)
+    if code is None:
+        return landuse_depth_config["default_max_depth"]
+    if code in landuse_depth_config["fine_codes"]:
+        return landuse_depth_config["fine_max_depth"]
+    if code in landuse_depth_config["coarse_codes"]:
+        return landuse_depth_config["coarse_max_depth"]
+    return landuse_depth_config["default_max_depth"]
+
+
+def _quadtree_max_depth_for_cell_key(
+    landuse_ctx,
+    origin_x,
+    origin_y,
+    base_cell,
+    key,
+    landuse_depth_config,
+    fallback_max_depth,
+):
+    level, i, j = key
+    return _quadtree_max_depth_for_key(
+        landuse_ctx, origin_x, origin_y, base_cell, level, i, j,
+        landuse_depth_config, fallback_max_depth,
+    )
 
 def _square_cell_bounds(origin_x, origin_y, base_cell, level, i, j):
     """グローバル quadtree 上の正方形セル（常に等辺）。"""
@@ -1195,7 +1481,17 @@ def _split_leaf(leaves, level_index, origin_x, origin_y, base_cell, dem_ctx, key
             new_keys.append(child_key)
     return new_keys
 
-def _enforce_2to1_balance(leaves, level_index, origin_x, origin_y, base_cell, dem_ctx, max_depth):
+def _enforce_2to1_balance(
+    leaves,
+    level_index,
+    origin_x,
+    origin_y,
+    base_cell,
+    dem_ctx,
+    max_depth,
+    landuse_ctx=None,
+    landuse_depth_config=None,
+):
     """隣接 leaf のレベル差が最大 1 になるまで分割（2:1 ルール）。"""
     levels_desc = sorted(level_index.keys(), reverse=True)
     changed = True
@@ -1204,6 +1500,10 @@ def _enforce_2to1_balance(leaves, level_index, origin_x, origin_y, base_cell, de
         changed = False
         for key in list(leaves):
             level, i, j = key
+            key_max_depth = _quadtree_max_depth_for_cell_key(
+                landuse_ctx, origin_x, origin_y, base_cell, key,
+                landuse_depth_config, max_depth,
+            )
             for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nkey = _find_neighbor_leaf(
                     leaves, level_index, levels_desc,
@@ -1212,13 +1512,17 @@ def _enforce_2to1_balance(leaves, level_index, origin_x, origin_y, base_cell, de
                 if nkey is None:
                     continue
                 nlevel = nkey[0]
-                if level - nlevel > 1 and nlevel < max_depth:
+                nkey_max_depth = _quadtree_max_depth_for_cell_key(
+                    landuse_ctx, origin_x, origin_y, base_cell, nkey,
+                    landuse_depth_config, max_depth,
+                )
+                if level - nlevel > 1 and nlevel < nkey_max_depth:
                     _split_leaf(leaves, level_index, origin_x, origin_y, base_cell, dem_ctx, nkey)
                     if nkey[0] + 1 not in levels_desc:
                         levels_desc = sorted(level_index.keys(), reverse=True)
                     changed = True
                     n_balance += 1
-                elif nlevel - level > 1 and level < max_depth:
+                elif nlevel - level > 1 and level < key_max_depth:
                     _split_leaf(leaves, level_index, origin_x, origin_y, base_cell, dem_ctx, key)
                     if key[0] + 1 not in levels_desc:
                         levels_desc = sorted(level_index.keys(), reverse=True)
@@ -1244,9 +1548,15 @@ def _eval_quadtree_cell(
     min_area,
     min_dem_samples,
     max_depth,
+    landuse_ctx=None,
+    landuse_depth_config=None,
 ):
     """正方形セルの分割要否と理由を返す（DEM std/relief のみ）。"""
-    if level >= max_depth:
+    cell_max_depth = _quadtree_max_depth_for_key(
+        landuse_ctx, origin_x, origin_y, base_cell, level, i, j,
+        landuse_depth_config, max_depth,
+    )
+    if level >= cell_max_depth:
         return False, None
 
     cell_area = _square_cell_area(base_cell, level)
@@ -1287,6 +1597,223 @@ def _eval_quadtree_cell(
         return True, "relief"
     return False, None
 
+def _work_metric_to_raster_metric(dem_ctx, value_m, cx, cy):
+    """Convert a length/area metric in work CRS [m / m²] to raster CRS units."""
+    if not dem_ctx._needs_transform:
+        return value_m
+    side = math.sqrt(abs(value_m)) if value_m > 0 else 1.0
+    x0, y0 = dem_ctx._to_raster(cx, cy)
+    x1, y1 = dem_ctx._to_raster(cx + side, cy)
+    x2, y2 = dem_ctx._to_raster(cx, cy + side)
+    sx = abs(x1 - x0) / side
+    sy = abs(y2 - y0) / side
+    if value_m >= 1.0 and side == math.sqrt(value_m):
+        return value_m * sx * sy
+    return value_m * max(sx, sy)
+
+
+def _work_quadtree_grid_to_raster(dem_ctx, origin_x, origin_y, base_cell, xmin, ymin, xmax, ymax):
+    """Map projected quadtree grid parameters to raster CRS for native C refine."""
+    if not dem_ctx._needs_transform:
+        return origin_x, origin_y, base_cell, xmin, ymin, xmax, ymax, False
+
+    to_r = dem_ctx._to_raster
+    rx0, ry0 = to_r(origin_x, origin_y)
+    rx1, ry1 = to_r(origin_x + base_cell, origin_y)
+    rx2, ry2 = to_r(origin_x, origin_y + base_cell)
+    base_r = max(abs(rx1 - rx0), abs(rx2 - rx0), 1e-12)
+
+    corners_x = [xmin, xmax, xmax, xmin]
+    corners_y = [ymin, ymin, ymax, ymax]
+    rx, ry = to_r(corners_x, corners_y)
+    xmin_r, xmax_r = float(min(rx)), float(max(rx))
+    ymin_r, ymax_r = float(min(ry)), float(max(ry))
+
+    origin_x_r = math.floor((xmin_r - rx0) / base_r) * base_r + rx0
+    origin_y_r = math.floor((ymin_r - ry0) / base_r) * base_r + ry0
+    return origin_x_r, origin_y_r, base_r, xmin_r, ymin_r, xmax_r, ymax_r, True
+
+
+def _leaf_cells_from_raster_grid(leaves, origin_x, origin_y, base_cell, dem_ctx):
+    """Convert raster-space quadtree leaves to work-CRS polygon boxes."""
+    cells = []
+    for level, i, j in leaves:
+        step = base_cell / (2 ** level)
+        raster_box = box(
+            origin_x + i * step,
+            origin_y + j * step,
+            origin_x + (i + 1) * step,
+            origin_y + (j + 1) * step,
+        )
+        if dem_ctx._from_raster is not None:
+            cells.append(shp_transform(dem_ctx._from_raster, raster_box))
+        else:
+            cells.append(raster_box)
+    return cells
+
+
+def _quadtree_refine_leaves_native(
+    dem_ctx,
+    origin_x,
+    origin_y,
+    base_cell,
+    xmin,
+    ymin,
+    xmax,
+    ymax,
+    std_threshold,
+    relief_threshold,
+    min_area,
+    max_depth,
+):
+    """Native C quadtree refine; returns metadata dict or None on failure/disabled."""
+    if not use_native:
+        return None
+    try:
+        cx = 0.5 * (xmin + xmax)
+        cy = 0.5 * (ymin + ymax)
+        (
+            grid_origin_x,
+            grid_origin_y,
+            grid_base,
+            grid_xmin,
+            grid_ymin,
+            grid_xmax,
+            grid_ymax,
+            raster_grid,
+        ) = _work_quadtree_grid_to_raster(
+            dem_ctx, origin_x, origin_y, base_cell, xmin, ymin, xmax, ymax,
+        )
+        min_area_grid = _work_metric_to_raster_metric(dem_ctx, min_area, cx, cy)
+
+        leaves_list = _mknative.quadtree_refine(
+            dem_ctx.array,
+            dem_ctx._valid,
+            dem_ctx.domain_mask,
+            dem_ctx.transform,
+            float(dem_ctx.nodata),
+            grid_origin_x,
+            grid_origin_y,
+            grid_base,
+            grid_xmin,
+            grid_ymin,
+            grid_xmax,
+            grid_ymax,
+            std_threshold,
+            relief_threshold,
+            min_area_grid,
+            max_depth,
+        )
+        leaves = {(level, i, j) for level, i, j in leaves_list}
+        if not leaves:
+            print("Warning: native quadtree returned 0 leaves; falling back to Python", flush=True)
+            return None
+        return {
+            "leaves": leaves,
+            "origin_x": grid_origin_x,
+            "origin_y": grid_origin_y,
+            "base_cell": grid_base,
+            "raster_grid": raster_grid,
+        }
+    except Exception as exc:
+        print(f"Warning: native quadtree refine failed ({exc}); falling back to Python", flush=True)
+        return None
+
+
+def _append_polygon_clip_parts(result_polys, clipped):
+    """Append intersection result (Polygon or MultiPolygon) to a polygon list."""
+    if clipped is None or clipped.is_empty:
+        return
+    if clipped.geom_type == "Polygon":
+        result_polys.append(clipped)
+    elif clipped.geom_type == "MultiPolygon":
+        result_polys.extend(clipped.geoms)
+
+
+def _python_grid_clip_candidates(
+    origin_x, origin_y, base_cell, max_leaf_level, leaf_by_key, xmin, ymin, xmax, ymax,
+):
+    """Leaf cells overlapping a query bbox (replaces full leaf scan)."""
+    candidates = []
+    for level in range(max_leaf_level + 1):
+        step = base_cell / (2 ** level)
+        if step <= 0:
+            continue
+        i0 = int(math.floor((xmin - origin_x) / step))
+        i1 = int(math.ceil((xmax - origin_x) / step))
+        j0 = int(math.floor((ymin - origin_y) / step))
+        j1 = int(math.ceil((ymax - origin_y) / step))
+        for i in range(i0, i1):
+            for j in range(j0, j1):
+                cell = leaf_by_key.get((level, i, j))
+                if cell is not None:
+                    candidates.append(cell)
+    return candidates
+
+
+def _quadtree_clip_overlay(large_polys, leaf_cells, origin_x, origin_y, base_cell, use_native):
+    """
+    Clip large road/building polygons by quadtree leaf squares.
+
+    Iterates leaves and queries a spatial index on large polygons (O(leaves·log P))
+    instead of scanning all leaves per polygon (O(P·leaves)).
+    """
+    poly_geoms = [g for g in large_polys if g is not None and not g.is_empty]
+    if not poly_geoms or not leaf_cells:
+        return []
+
+    leaf_by_key = {}
+    max_leaf_level = 0
+    for cell in leaf_cells:
+        b = cell.bounds
+        step = b[2] - b[0]
+        level = int(round(math.log(base_cell / step) / math.log(2))) if step > 0 else 0
+        max_leaf_level = max(max_leaf_level, level)
+        i = int(math.floor((b[0] - origin_x) / step))
+        j = int(math.floor((b[1] - origin_y) / step))
+        leaf_by_key[(level, i, j)] = cell
+
+    poly_tree = STRtree(poly_geoms)
+    result_polys = []
+    n_tests = 0
+
+    if use_native and len(poly_geoms) <= 64:
+        # Few large polygons: native grid index per polygon is competitive.
+        for geom in poly_geoms:
+            gb = geom.bounds
+            try:
+                candidate_keys = _mknative.grid_clip_candidates(
+                    origin_x, origin_y, base_cell, max_leaf_level,
+                    gb[0], gb[1], gb[2], gb[3],
+                )
+                candidates = [leaf_by_key[k] for k in candidate_keys if k in leaf_by_key]
+            except Exception:
+                candidates = _python_grid_clip_candidates(
+                    origin_x, origin_y, base_cell, max_leaf_level, leaf_by_key,
+                    gb[0], gb[1], gb[2], gb[3],
+                )
+            for leaf in candidates:
+                if not geom.intersects(leaf):
+                    continue
+                n_tests += 1
+                _append_polygon_clip_parts(result_polys, geom.intersection(leaf))
+    else:
+        for leaf in leaf_cells:
+            for idx in poly_tree.query(leaf):
+                geom = poly_geoms[int(idx)]
+                if not geom.intersects(leaf):
+                    continue
+                n_tests += 1
+                _append_polygon_clip_parts(result_polys, geom.intersection(leaf))
+
+    print(
+        f"quadtree overlay clip: 大ポリゴン {len(poly_geoms)} × leaf {len(leaf_cells)}, "
+        f"intersection_tests={n_tests}",
+        flush=True,
+    )
+    return result_polys
+
+
 def split_polygons_by_quadtree_dem(
     polygon_gdf,
     dem_path,
@@ -1300,6 +1827,8 @@ def split_polygons_by_quadtree_dem(
     mesh_mode="clip",
     domain_gdf=None,
     domain_mode="target",
+    landuse_path=None,
+    landuse_depth_config=None,
 ):
     """
     グローバル quadtree による DEM 適応分割（std / relief のみ）。
@@ -1310,6 +1839,8 @@ def split_polygons_by_quadtree_dem(
     domain_mode (pure 時):
       - "target": target_area と交差する leaf のみ（正方形のまま）
       - "bbox": target の外接 bbox 内の leaf をすべて採用
+    landuse_depth_config:
+      qt_landuse_depth 有効時、セル内の土地利用多数決で max_depth を切り替える。
     """
     if len(polygon_gdf) == 0:
         return polygon_gdf.copy()
@@ -1358,60 +1889,125 @@ def split_polygons_by_quadtree_dem(
             src, work_crs, nodata_value, domain_geom, (xmin, ymin, xmax, ymax)
         )
 
-        leaves = {
-            key for key in _initial_root_cells(origin_x, origin_y, base_cell, xmin, ymin, xmax, ymax)
-            if _cell_has_domain_pixels(dem_stats, origin_x, origin_y, base_cell, key[0], key[1], key[2])
-        }
-        level_index = _quadtree_level_index(leaves)
-
-        eval_common = (
-            dem_stats, origin_x, origin_y, base_cell,
-            domain_geom, domain_prep,
-            std_threshold, relief_threshold,
-            min_area, min_dem_samples, max_depth,
-        )
-        split_reason_counter = defaultdict(int)
-        n_refine_pass = 0
-        pending = set(leaves)
-
-        while pending:
-            min_level = min(k[0] for k in pending)
-            if min_level >= max_depth:
-                break
-
-            to_split = []
-            for key in pending:
-                level, i, j = key
-                should_split, reason = _eval_quadtree_cell(
-                    dem_stats, origin_x, origin_y, base_cell, level, i, j, *eval_common[4:]
+        landuse_ctx = None
+        active_landuse_depth = landuse_depth_config
+        if active_landuse_depth is not None:
+            if landuse_path and os.path.isfile(landuse_path):
+                with rasterio.open(landuse_path) as lu_src:
+                    landuse_ctx = _QuadtreeLanduseContext.try_open(
+                        lu_src, work_crs, (xmin, ymin, xmax, ymax)
+                    )
+                if landuse_ctx is None:
+                    active_landuse_depth = None
+            else:
+                print(
+                    "Warning: qt_landuse_depth が有効ですが土地利用ラスタが見つかりません。"
+                    " global max_depth を使用します。",
+                    flush=True,
                 )
-                if should_split:
-                    if reason:
-                        split_reason_counter[reason] += 1
-                    to_split.append(key)
+                active_landuse_depth = None
 
-            if not to_split:
-                break
+        effective_max_depth = (
+            active_landuse_depth["global_max_depth"]
+            if active_landuse_depth is not None else max_depth
+        )
 
+        native_result = None
+        if active_landuse_depth is None:
+            native_result = _quadtree_refine_leaves_native(
+                dem_stats,
+                origin_x,
+                origin_y,
+                base_cell,
+                xmin,
+                ymin,
+                xmax,
+                ymax,
+                std_threshold,
+                relief_threshold,
+                min_area,
+                max_depth,
+            )
+        else:
+            print("quadtree refine: landuse depth 有効 — Python 経路を使用", flush=True)
+
+        split_reason_counter = defaultdict(int)
+        native_raster_grid = False
+        if native_result is not None:
+            leaves = set(native_result["leaves"])
+            native_raster_grid = native_result["raster_grid"]
+            grid_origin_x = native_result["origin_x"]
+            grid_origin_y = native_result["origin_y"]
+            grid_base_cell = native_result["base_cell"]
+            level_index = _quadtree_level_index(leaves)
+            n_refine_pass = 0
+            split_reason_counter["native"] = len(leaves)
             print(
-                f"quadtree refine pass {n_refine_pass + 1}: "
-                f"分割 {len(to_split)} / 判定 {len(pending)} セル, leaf={len(leaves)}",
+                f"quadtree refine (native C): leaf={len(leaves)}"
+                f"{', raster_grid' if native_raster_grid else ''}",
                 flush=True,
             )
+        else:
+            leaves = {
+                key for key in _initial_root_cells(origin_x, origin_y, base_cell, xmin, ymin, xmax, ymax)
+                if _cell_has_domain_pixels(dem_stats, origin_x, origin_y, base_cell, key[0], key[1], key[2])
+            }
+            level_index = _quadtree_level_index(leaves)
 
-            next_pending = set()
-            for key in to_split:
-                for child_key in _split_leaf(
-                    leaves, level_index, origin_x, origin_y, base_cell, dem_stats, key
-                ):
-                    next_pending.add(child_key)
-            pending = next_pending
-            n_refine_pass += 1
+            eval_common = (
+                dem_stats, origin_x, origin_y, base_cell,
+                domain_geom, domain_prep,
+                std_threshold, relief_threshold,
+                min_area, min_dem_samples, effective_max_depth,
+                landuse_ctx, active_landuse_depth,
+            )
+            n_refine_pass = 0
+            pending = set(leaves)
 
-        print(f"quadtree 2:1 balance 開始: leaf={len(leaves)}", flush=True)
-        n_balance = _enforce_2to1_balance(
-            leaves, level_index, origin_x, origin_y, base_cell, dem_stats, max_depth
-        )
+            while pending:
+                min_level = min(k[0] for k in pending)
+                if min_level >= effective_max_depth:
+                    break
+
+                to_split = []
+                for key in pending:
+                    level, i, j = key
+                    should_split, reason = _eval_quadtree_cell(
+                        dem_stats, origin_x, origin_y, base_cell, level, i, j, *eval_common[4:]
+                    )
+                    if should_split:
+                        if reason:
+                            split_reason_counter[reason] += 1
+                        to_split.append(key)
+
+                if not to_split:
+                    break
+
+                print(
+                    f"quadtree refine pass {n_refine_pass + 1}: "
+                    f"分割 {len(to_split)} / 判定 {len(pending)} セル, leaf={len(leaves)}",
+                    flush=True,
+                )
+
+                next_pending = set()
+                for key in to_split:
+                    for child_key in _split_leaf(
+                        leaves, level_index, origin_x, origin_y, base_cell, dem_stats, key
+                    ):
+                        next_pending.add(child_key)
+                pending = next_pending
+                n_refine_pass += 1
+
+        if native_result is not None and native_raster_grid:
+            n_balance = 0
+            print("quadtree 2:1 balance: skipped for native raster grid", flush=True)
+        else:
+            print(f"quadtree 2:1 balance 開始: leaf={len(leaves)}", flush=True)
+            n_balance = _enforce_2to1_balance(
+                leaves, level_index, origin_x, origin_y, base_cell, dem_stats, effective_max_depth,
+                landuse_ctx=landuse_ctx,
+                landuse_depth_config=active_landuse_depth,
+            )
 
         depth_counter = defaultdict(int)
         for level, _, _ in leaves:
@@ -1425,13 +2021,18 @@ def split_polygons_by_quadtree_dem(
         )
 
         leaf_cells = []
-        for level, i, j in leaves:
-            step = base_cell / (2 ** level)
-            cx0 = origin_x + i * step
-            cy0 = origin_y + j * step
-            cx1 = origin_x + (i + 1) * step
-            cy1 = origin_y + (j + 1) * step
-            leaf_cells.append(box(cx0, cy0, cx1, cy1))
+        if native_result is not None and native_raster_grid:
+            leaf_cells = _leaf_cells_from_raster_grid(
+                leaves, grid_origin_x, grid_origin_y, grid_base_cell, dem_stats,
+            )
+        else:
+            for level, i, j in leaves:
+                step = base_cell / (2 ** level)
+                cx0 = origin_x + i * step
+                cy0 = origin_y + j * step
+                cx1 = origin_x + (i + 1) * step
+                cy1 = origin_y + (j + 1) * step
+                leaf_cells.append(box(cx0, cy0, cx1, cy1))
 
         if mesh_mode == "pure":
             if domain_mode == "bbox":
@@ -1459,23 +2060,11 @@ def split_polygons_by_quadtree_dem(
 
             result_polys = list(small_polys)
             if large_polys and leaf_cells:
-                print(
-                    f"quadtree overlay clip: 大ポリゴン {len(large_polys)} × leaf {len(leaf_cells)}",
-                    flush=True,
+                result_polys.extend(
+                    _quadtree_clip_overlay(
+                        large_polys, leaf_cells, origin_x, origin_y, base_cell, use_native,
+                    )
                 )
-                large_gdf = gpd.GeoDataFrame(geometry=large_polys, crs=work_crs)
-                leaf_gdf = gpd.GeoDataFrame(geometry=leaf_cells, crs=work_crs)
-                clipped_gdf = gpd.overlay(
-                    large_gdf, leaf_gdf, how="intersection", keep_geom_type=False
-                )
-                if len(clipped_gdf) > 0:
-                    clipped_gdf = clipped_gdf.explode(index_parts=False)
-                    clipped_gdf = clipped_gdf[
-                        clipped_gdf.geometry.notnull()
-                        & (~clipped_gdf.geometry.is_empty)
-                        & (clipped_gdf.geometry.area > 0)
-                    ]
-                    result_polys.extend(clipped_gdf.geometry.tolist())
 
     out_gdf = gpd.GeoDataFrame(geometry=result_polys, crs=work_crs)
     out_gdf = out_gdf[out_gdf.geometry.notnull() & (~out_gdf.geometry.is_empty)].reset_index(drop=True)
@@ -1494,20 +2083,23 @@ else:
             qt_input_gdf = input_gdf
         else:
             qt_input_gdf = Poly05_2_2
-        Poly05_5 = split_polygons_by_quadtree_dem(
-            qt_input_gdf,
-            input_dem,
-            std_threshold=qt_std_threshold,
-            relief_threshold=qt_relief_threshold,
-            max_depth=qt_max_depth,
-            min_area=qt_min_area,
-            min_dem_samples=qt_min_dem_samples,
-            split_area_threshold=hex_area_threshold,
-            grid_cell_size=qt_root_cell_size,
-            mesh_mode=qt_mesh_mode,
-            domain_gdf=input_gdf,
-            domain_mode=qt_domain,
-        )
+        with stage("quadtree_refine"):
+            Poly05_5 = split_polygons_by_quadtree_dem(
+                qt_input_gdf,
+                input_dem,
+                std_threshold=qt_std_threshold,
+                relief_threshold=qt_relief_threshold,
+                max_depth=qt_max_depth,
+                min_area=qt_min_area,
+                min_dem_samples=qt_min_dem_samples,
+                split_area_threshold=hex_area_threshold,
+                grid_cell_size=qt_root_cell_size,
+                mesh_mode=qt_mesh_mode,
+                domain_gdf=input_gdf,
+                domain_mode=qt_domain,
+                landuse_path=LandUse_directory,
+                landuse_depth_config=qt_landuse_depth_config,
+            )
         print(f"05_4-05_5(quadtree): 分割後ポリゴン数 = {len(Poly05_5)}")
     else:
         hex_polygons = create_hex_grid(input_gdf, dist)
@@ -1525,6 +2117,7 @@ else:
 
 # Poly05_5.to_file(f"{output_folder}/05_5_Poly.gpkg", layer='poly', driver="GPKG")
 print('05_5: ',Poly05_5.geom_type.value_counts()) # ジオメトリタイプを確認
+_phase_t0 = time.perf_counter()
 
 # 05_5_1: 細長メッシュ分割（enable_aspect=false のときスキップ）
 if enable_aspect_refinement:
@@ -1746,66 +2339,71 @@ if enable_aspect_refinement:
         print("クラスタ重心が0個のため、保存をスキップします。")
 
     # 05_5_6: ヴォロノイ（ティーセン）分割による細長ポリゴンの最終分割
-    # 高アスペクト比ポリゴンを重心点を使ったヴォロノイ分割で細分割
-    final_polygons = []
+    if len(centroid_gdf) == 0:
+        print("05_5_6: Voronoi 対象なし — ポリゴンをそのまま保持", flush=True)
+        final_gdf = Poly05_5.copy()
+    else:
+        # 高アスペクト比ポリゴンを重心点を使ったヴォロノイ分割で細分割
+        final_polygons = []
+        centroid_sources = set(centroid_gdf["source_idx"].values)
 
-    # 全ポリゴンを処理（分割対象外も結果に含めるため）
-    for idx, row in Poly05_5.iterrows():
-        geom = row.geometry
-        aspect = row["aspect_ratio"]
+        # 全ポリゴンを処理（分割対象外も結果に含めるため）
+        for idx, row in Poly05_5.iterrows():
+            geom = row.geometry
+            aspect = row["aspect_ratio"]
 
-        if aspect < aspect_ratio_threshold or idx not in centroid_gdf["source_idx"].values:
-            # 分割対象外（しきい値未満または重心なし）→そのまま保持
-            final_polygons.append({
-                "source_idx": idx,
-                "subpoly_id": -1,
-                "Cluster": -1,
-                "geometry": geom
-            })
-            continue
+            if aspect < aspect_ratio_threshold or idx not in centroid_sources:
+                # 分割対象外（しきい値未満または重心なし）→そのまま保持
+                final_polygons.append({
+                    "source_idx": idx,
+                    "subpoly_id": -1,
+                    "Cluster": -1,
+                    "geometry": geom
+                })
+                continue
 
-        # 分割対象ポリゴン（重心ポイントが存在）
-        relevant_centroids = centroid_gdf[centroid_gdf["source_idx"] == idx]
-        if len(relevant_centroids) < 2:
-            # 重心が1個以下の場合は分割不可→そのまま保持
-            final_polygons.append({
-                "source_idx": idx,
-                "subpoly_id": -1,
-                "Cluster": -1,
-                "geometry": geom
-            })
-            continue
+            # 分割対象ポリゴン（重心ポイントが存在）
+            relevant_centroids = centroid_gdf[centroid_gdf["source_idx"] == idx]
+            if len(relevant_centroids) < 2:
+                # 重心が1個以下の場合は分割不可→そのまま保持
+                final_polygons.append({
+                    "source_idx": idx,
+                    "subpoly_id": -1,
+                    "Cluster": -1,
+                    "geometry": geom
+                })
+                continue
 
-        # 重心点をヴォロノイ分割に適合するMultiPointに変換（2D化）
-        points = MultiPoint([force_2d(pt) for pt in relevant_centroids.geometry])
+            # 重心点をヴォロノイ分割に適合するMultiPointに変換（2D化）
+            points = MultiPoint([force_2d(pt) for pt in relevant_centroids.geometry])
 
-        # ヴォロノイ（ティーセン）分割の実行
-        voronoi = voronoi_diagram(points, envelope=geom, tolerance=0.0)
+            # ヴォロノイ（ティーセン）分割の実行
+            voronoi = voronoi_diagram(points, envelope=geom, tolerance=0.0)
 
-        # 各ポリゴンをクリップして対応付け
-        for cluster_idx, centroid_row in relevant_centroids.iterrows():
-            pt = centroid_row.geometry
-            cluster = centroid_row["Cluster"]
-            subpoly_id = centroid_row["subpoly_id"]
-            src_idx = centroid_row["source_idx"]
+            # 各ポリゴンをクリップして対応付け
+            for cluster_idx, centroid_row in relevant_centroids.iterrows():
+                pt = centroid_row.geometry
+                cluster = centroid_row["Cluster"]
+                subpoly_id = centroid_row["subpoly_id"]
+                src_idx = centroid_row["source_idx"]
 
-            # centroid が含まれる Voronoi 領域を探す
-            for region in voronoi.geoms:
-                if region.contains(pt):
-                    clipped = region.intersection(geom)
-                    if clipped.is_empty:
-                        continue
+                # centroid が含まれる Voronoi 領域を探す
+                for region in voronoi.geoms:
+                    if region.contains(pt):
+                        clipped = region.intersection(geom)
+                        if clipped.is_empty:
+                            continue
 
-                    final_polygons.append({
-                        "source_idx": src_idx,
-                        "subpoly_id": subpoly_id,
-                        "Cluster": cluster,
-                        "geometry": clipped
-                    })
-                    break
+                        final_polygons.append({
+                            "source_idx": src_idx,
+                            "subpoly_id": subpoly_id,
+                            "Cluster": cluster,
+                            "geometry": clipped
+                        })
+                        break
 
-    # ヴォロノイ分割結果をGeoDataFrameに変換して保存
-    final_gdf = gpd.GeoDataFrame(final_polygons, geometry="geometry", crs=Poly05_5.crs)
+        # ヴォロノイ分割結果をGeoDataFrameに変換して保存
+        final_gdf = gpd.GeoDataFrame(final_polygons, geometry="geometry", crs=Poly05_5.crs)
     # final_gdf.to_file(f"{output_folder}/05_5_6_Poly.gpkg", layer="split_polygons", driver="GPKG")
 
     if enable_voronoi_refinement:
@@ -1823,12 +2421,15 @@ if enable_aspect_refinement:
         flush=True,
     )
 
-    Poly05_5 = retopologize_mesh_gdf(
-        Poly05_5,
-        snap_tol=0.05,
-        domain_geom=input_gdf.union_all(),
-        label="05_5_7",
-    )
+    if enable_voronoi_refinement and len(centroid_gdf) == 0 and n_high_aspect == 0:
+        print("05_5_7: 再トポロジ化をスキップ（Voronoi/細長分割なし）", flush=True)
+    else:
+        Poly05_5 = retopologize_mesh_gdf(
+            Poly05_5,
+            snap_tol=0.05,
+            domain_geom=input_gdf.union_all(),
+            label="05_5_7",
+        )
 else:
     print("05_5_2-05_5_7: アスペクト比/Voronoi 再分割をスキップ", flush=True)
 
@@ -1924,6 +2525,7 @@ def polygon_to_nodes_and_edges(polygon_gdf, precision=4):
     return points_gdf, lines_gdf
 
 # 05_5の分割結果からノード・エッジを抽出
+_subphase_t0 = time.perf_counter()
 Point05_5, Line05_5 = polygon_to_nodes_and_edges(Poly05_5, precision=4)
 # Point05_5.to_file(f"{output_folder}/05_6_Point.gpkg", layer='point', driver="GPKG")
 # Line05_5.to_file(f"{output_folder}/05_7_Line.gpkg", layer='line', driver="GPKG")
@@ -1951,6 +2553,7 @@ Point05_5 = add_traffic_column(Point05_5)
 print('05_8: ',Point05_5.geom_type.value_counts()) # ジオメトリタイプを確認
 
 print(Point05_5[['NodeID', 'LineList', 'Traffic']].head())
+timing_record("initial_mesh_graph", time.perf_counter() - _subphase_t0)
 
 # ============================================================================
 # フェーズ7: 角度フィルタリングによる不要エッジの削除 (05_9-05_10)
@@ -1992,183 +2595,204 @@ def calculate_angle(line1, line2):
 
     return angle_deg
 
-def angle_filtering(points_gdf, lines_gdf, angle_threshold=8.0):
-    # 出力用のラインデータを準備
-    new_lines_gdf = lines_gdf.copy()
+def _angle_filtering_fast(points_gdf, lines_gdf, angle_threshold=8.0):
+    point_geometries = {
+        int(row.NodeID): row.geometry for row in points_gdf.itertuples()
+    }
+    active_points = set(point_geometries)
+    active_lines = {}
+    line_rank = {}
+    for rank, row in enumerate(lines_gdf.itertuples()):
+        line_id = int(row.LineID)
+        start_node = int(row.StartNode)
+        end_node = int(row.EndNode)
+        active_lines[line_id] = (start_node, end_node, row.geometry)
+        line_rank[line_id] = rank
+    initial_node_lines = {}
+    for row in points_gdf.itertuples():
+        line_list = row.LineList
+        if isinstance(line_list, str):
+            line_list = ast.literal_eval(line_list)
+        initial_node_lines[int(row.NodeID)] = list(line_list or [])
 
-    # 出力用のポイントデータを準備
-    new_points_gdf = points_gdf.copy()
+    next_rank = len(active_lines)
+    candidates = points_gdf.loc[
+        points_gdf["Traffic"] == 2, "NodeID"
+    ].astype(np.int64).tolist()
+    for node_id in candidates:
+        if node_id not in active_points:
+            continue
+        # Preserve legacy semantics: LineList was not effectively updated
+        # inside a pass, so adjacent simplifications wait for the next pass.
+        incident = [
+            line_id for line_id in initial_node_lines.get(node_id, ())
+            if line_id in active_lines
+        ]
+        if len(incident) != 2:
+            continue
+        incident.sort(key=line_rank.__getitem__)
+        line_id1, line_id2 = incident
+        start1, end1, geom1 = active_lines[line_id1]
+        start2, end2, geom2 = active_lines[line_id2]
+        if calculate_angle(geom1, geom2) > angle_threshold:
+            continue
+        other1 = end1 if start1 == node_id else start1
+        other2 = end2 if start2 == node_id else start2
+        if other1 not in active_points or other2 not in active_points:
+            continue
 
-    # NodeIDとangleを格納するリストを初期化
-    angle_data = []
-    line_check = []
+        new_id = max(active_lines, default=-1) + 1
+        active_lines[new_id] = (
+            other1,
+            other2,
+            LineString([point_geometries[other1], point_geometries[other2]]),
+        )
+        line_rank[new_id] = next_rank
+        next_rank += 1
+        del active_lines[line_id1]
+        del active_lines[line_id2]
+        active_points.remove(node_id)
 
-    # tqdmの進捗表示
-    tqdm.pandas(desc="Processing points")
-
-    # Trafficが2の場合のフィルタリングを事前に行う
-    filtered_points_gdf = points_gdf[points_gdf['Traffic'] == 2].copy()
-
-    # 'LineList'をリスト化（文字列 -> リスト）
-    filtered_points_gdf['LineList'] = filtered_points_gdf['LineList'].apply(
-        lambda x: ast.literal_eval(x) if isinstance(x, str) else x
+    new_points_gdf = points_gdf[
+        points_gdf["NodeID"].astype(np.int64).isin(active_points)
+    ].drop_duplicates(subset="geometry").copy()
+    new_lines_gdf = gpd.GeoDataFrame(
+        [
+            {
+                "LineID": line_id,
+                "StartNode": data[0],
+                "EndNode": data[1],
+                "geometry": data[2],
+            }
+            for line_id, data in active_lines.items()
+        ],
+        geometry="geometry",
+        crs=lines_gdf.crs,
+    ).drop_duplicates(subset="geometry")
+    new_points_gdf.loc[:, "NodeID"] = np.arange(len(new_points_gdf), dtype=np.int64)
+    new_lines_gdf.loc[:, "LineID"] = np.arange(len(new_lines_gdf), dtype=np.int64)
+    new_points_gdf, new_lines_gdf = process_geodata_optimized(
+        new_points_gdf, new_lines_gdf
     )
-
-    # PointNodeIDごとにラインの情報を取得
-    filtered_points_gdf, new_lines_gdf, line_list_dict = update_lines_and_points(filtered_points_gdf, lines_gdf)
-
-    # ライン処理を行う
-    for _, point in tqdm(filtered_points_gdf.iterrows(), total=len(filtered_points_gdf), desc="Filtering points"):
-        #line_ids = line_list_dict.get(str(point['NodeID']), [])
-        start_point = new_points_gdf.loc[new_points_gdf['NodeID'] == point['NodeID']]
-        if isinstance(start_point['LineList'].iloc[0], str):  # 文字列の場合
-            line_ids = eval(start_point['LineList'].iloc[0])
-        else:  # すでにリストの場合
-            line_ids = start_point['LineList'].iloc[0]
-
-        if len(line_ids) == 2:
-            lines_to_check = new_lines_gdf[new_lines_gdf['LineID'].isin(line_ids)]
-
-            # lines_to_checkをCSV出力用に保存
-            for _, line in lines_to_check.iterrows():
-                line_check.append({
-                    'NodeID': point['NodeID'],
-                    'LineID': line['LineID'],
-                    'LineGeometry': line['geometry']
-                })
-
-            if len(lines_to_check) == 2:
-                line1, line2 = lines_to_check.iloc[0], lines_to_check.iloc[1]
-                angle = calculate_angle(line1['geometry'], line2['geometry'])
-                angle_data.append({'NodeID': point['NodeID'], 'Angle': angle})
-
-                if angle <= angle_threshold:
-                    # 結合するノードを特定（StartNode, EndNodeと一致するかを確認）
-                    point1, NodeID1 = find_connected_point(line1, point, new_points_gdf)
-                    point2, NodeID2 = find_connected_point(line2, point, new_points_gdf)
-
-                    if not point1.empty and not point2.empty:
-                        coord1 = point1.geometry.iloc[0]
-                        coord2 = point2.geometry.iloc[0]
-
-                        # 新しいLineStringを作成
-                        new_line = create_new_line(NodeID1, NodeID2, coord1, coord2, new_lines_gdf)
-
-                        # 新しいラインをリストに追加
-                        new_lines_gdf = pd.concat([new_lines_gdf, new_line], ignore_index=True)
-
-                        # 結合前のラインとポイントを削除
-                        new_lines_gdf = new_lines_gdf[~new_lines_gdf['LineID'].isin([line1['LineID'], line2['LineID']])].copy()
-                        new_points_gdf = new_points_gdf[~new_points_gdf['NodeID'].isin([point['NodeID']])].copy()
-
-                        # LineListを再設定（point1, point2に対してLineListを更新）
-                        new_points_gdf = update_line_list_for_points(new_points_gdf, point1['NodeID'], line1['LineID'], new_line['LineID'])
-                        new_points_gdf = update_line_list_for_points(new_points_gdf, point2['NodeID'], line2['LineID'], new_line['LineID'])
-
-                        # どこかでNodeIDが文字列に変わるため、整数に変換
-                        new_points_gdf['NodeID'] = new_points_gdf['NodeID'].astype(int).copy()
-
-    # 重複削除
-    new_points_gdf = new_points_gdf.drop_duplicates(subset='geometry')
-    new_lines_gdf = new_lines_gdf.drop_duplicates(subset='geometry')
-
-    # NodeIDとangleの情報をCSVに出力（デバッグ用：コメントアウト）
-    # angle_df = pd.DataFrame(angle_data)
-    # angle_df.to_csv('node_id_and_angle.csv', index=False)
-
-    # lines_to_checkの情報をCSVに出力（デバッグ用：コメントアウト）
-    # line_check_df = pd.DataFrame(line_check)
-    # line_check_df.to_csv('lines_to_check.csv', index=False)
-
-    # NodeIDとLineIDの振り直し
-    new_points_gdf.loc[:, 'NodeID'] = range(0, len(new_points_gdf))
-    new_lines_gdf.loc[:, 'LineID'] = range(0, len(new_lines_gdf))
-
-    # StartNode, EndNode再設定
-    new_points_gdf, new_lines_gdf = process_geodata_optimized(new_points_gdf, new_lines_gdf)
-
-    # LineList再設定
-    new_points_gdf, new_lines_gdf, _ = update_lines_and_points(new_points_gdf, new_lines_gdf)
-
-    # 出力用のラインデータとポイントデータをコピー（エラー回避用）
-    new_points_gdf = new_points_gdf.copy()
-    new_lines_gdf = new_lines_gdf.copy()
-
-    # CRSの設定
+    new_points_gdf, new_lines_gdf, _ = update_lines_and_points(
+        new_points_gdf, new_lines_gdf
+    )
     new_points_gdf.set_crs(points_gdf.crs, allow_override=True, inplace=True)
     new_lines_gdf.set_crs(lines_gdf.crs, allow_override=True, inplace=True)
-
     return new_points_gdf, new_lines_gdf
+
+def _angle_filtering_reference(points_gdf, lines_gdf, angle_threshold=8.0):
+    """Reference implementation retained for topology equivalence checks."""
+    new_lines_gdf = lines_gdf.copy()
+    new_points_gdf = points_gdf.copy()
+    filtered_points_gdf = points_gdf[points_gdf['Traffic'] == 2].copy()
+    filtered_points_gdf, new_lines_gdf, _ = update_lines_and_points(
+        filtered_points_gdf, lines_gdf
+    )
+    for _, point in filtered_points_gdf.iterrows():
+        start_point = new_points_gdf.loc[
+            new_points_gdf['NodeID'] == point['NodeID']
+        ]
+        line_ids = start_point['LineList'].iloc[0]
+        if isinstance(line_ids, str):
+            line_ids = eval(line_ids)
+        if len(line_ids) != 2:
+            continue
+        lines_to_check = new_lines_gdf[new_lines_gdf['LineID'].isin(line_ids)]
+        if len(lines_to_check) != 2:
+            continue
+        line1, line2 = lines_to_check.iloc[0], lines_to_check.iloc[1]
+        if calculate_angle(line1['geometry'], line2['geometry']) > angle_threshold:
+            continue
+        point1, node_id1 = find_connected_point(line1, point, new_points_gdf)
+        point2, node_id2 = find_connected_point(line2, point, new_points_gdf)
+        if point1.empty or point2.empty:
+            continue
+        new_line = create_new_line(
+            node_id1, node_id2,
+            point1.geometry.iloc[0], point2.geometry.iloc[0], new_lines_gdf
+        )
+        new_lines_gdf = pd.concat([new_lines_gdf, new_line], ignore_index=True)
+        new_lines_gdf = new_lines_gdf[
+            ~new_lines_gdf['LineID'].isin([line1['LineID'], line2['LineID']])
+        ].copy()
+        new_points_gdf = new_points_gdf[
+            ~new_points_gdf['NodeID'].isin([point['NodeID']])
+        ].copy()
+        new_points_gdf = update_line_list_for_points(
+            new_points_gdf, point1['NodeID'], line1['LineID'], new_line['LineID']
+        )
+        new_points_gdf = update_line_list_for_points(
+            new_points_gdf, point2['NodeID'], line2['LineID'], new_line['LineID']
+        )
+        new_points_gdf['NodeID'] = new_points_gdf['NodeID'].astype(int).copy()
+    new_points_gdf = new_points_gdf.drop_duplicates(subset='geometry')
+    new_lines_gdf = new_lines_gdf.drop_duplicates(subset='geometry')
+    new_points_gdf.loc[:, 'NodeID'] = range(0, len(new_points_gdf))
+    new_lines_gdf.loc[:, 'LineID'] = range(0, len(new_lines_gdf))
+    new_points_gdf, new_lines_gdf = process_geodata_optimized(
+        new_points_gdf, new_lines_gdf
+    )
+    new_points_gdf, new_lines_gdf, _ = update_lines_and_points(
+        new_points_gdf, new_lines_gdf
+    )
+    new_points_gdf.set_crs(points_gdf.crs, allow_override=True, inplace=True)
+    new_lines_gdf.set_crs(lines_gdf.crs, allow_override=True, inplace=True)
+    return new_points_gdf, new_lines_gdf
+
+angle_filtering = _angle_filtering_fast
 
 def update_lines_and_points(points_gdf, lines_gdf):
     # 'LineList'属性が存在しない場合は初期化する
     if 'LineList' not in points_gdf.columns:
         points_gdf['LineList'] = None
 
-    # StartNode と EndNode
-    points_gdf.loc[:, 'NodeID'] = points_gdf['NodeID']
-    lines_gdf.loc[:, 'StartNode'] = lines_gdf['StartNode']
-    lines_gdf.loc[:, 'EndNode'] = lines_gdf['EndNode']
+    points_gdf = points_gdf.copy()
+    lines_gdf = lines_gdf.copy()
+    points_gdf["NodeID"] = points_gdf["NodeID"].astype(np.int64)
+    lines_gdf["LineID"] = lines_gdf["LineID"].astype(np.int64)
+    lines_gdf["StartNode"] = lines_gdf["StartNode"].astype(np.int64)
+    lines_gdf["EndNode"] = lines_gdf["EndNode"].astype(np.int64)
 
-    # NodeID と一致する StartNode または EndNode の LineID を取得
-    # LineID がStartNode または EndNode に含まれているラインを抽出する
-    start_lines = lines_gdf[['LineID', 'StartNode']]
-    end_lines = lines_gdf[['LineID', 'EndNode']]
-
-    # ポイントデータの NodeID と一致する LineID をリスト化
-    start_match = pd.merge(points_gdf[['NodeID']], start_lines, how='left', left_on='NodeID', right_on='StartNode')
-    end_match = pd.merge(points_gdf[['NodeID']], end_lines, how='left', left_on='NodeID', right_on='EndNode')
-
-    # マッチした結果の LineID をリストとして格納
-    line_list_dict = {}
-
-    # start_match と end_match の結果を結合し、LineID をリスト化
-    for idx, row in start_match.iterrows():
-        node_id = row['NodeID']
-        line_id = row['LineID']
-        if node_id not in line_list_dict:
-            line_list_dict[node_id] = []
-        if pd.notna(line_id) and line_id not in line_list_dict[node_id]:
-            line_list_dict[node_id].append(int(line_id))  # 明示的に整数に変換
-
-    for idx, row in end_match.iterrows():
-        node_id = row['NodeID']
-        line_id = row['LineID']
-        if node_id not in line_list_dict:
-            line_list_dict[node_id] = []
-        if pd.notna(line_id) and line_id not in line_list_dict[node_id]:
-            line_list_dict[node_id].append(int(line_id))  # 明示的に整数に変換
-
-    # 'LineList' カラムにリスト化された LineID をセット
-    points_gdf['LineList'] = points_gdf['NodeID'].map(line_list_dict)
-
-    # 整数に戻す
-    points_gdf.loc[:, 'NodeID'] = points_gdf['NodeID'].astype(int)
-    lines_gdf.loc[:, 'StartNode'] = lines_gdf['StartNode'].astype(int)
-    lines_gdf.loc[:, 'EndNode'] = lines_gdf['EndNode'].astype(int)
+    start_pairs = lines_gdf[["LineID", "StartNode"]].rename(
+        columns={"StartNode": "NodeID"}
+    )
+    end_pairs = lines_gdf[["LineID", "EndNode"]].rename(
+        columns={"EndNode": "NodeID"}
+    )
+    pairs = pd.concat([start_pairs, end_pairs], ignore_index=True)
+    pairs = pairs.drop_duplicates(["NodeID", "LineID"], keep="first")
+    line_list_dict = pairs.groupby("NodeID", sort=False)["LineID"].agg(list).to_dict()
+    points_gdf["LineList"] = points_gdf["NodeID"].map(line_list_dict)
 
     return points_gdf, lines_gdf, line_list_dict
 
 def process_geodata_optimized(new_points_gdf, new_lines_gdf):
-    # NodeID辞書の作成
-    node_id_dict = {tuple(point.geometry.coords[0]): point['NodeID'] for _, point in new_points_gdf.iterrows()}
+    new_points_gdf = new_points_gdf.copy()
+    new_lines_gdf = new_lines_gdf.copy()
+    node_id_dict = {
+        tuple(geom.coords[0]): int(node_id)
+        for geom, node_id in zip(
+            new_points_gdf.geometry.values, new_points_gdf["NodeID"].to_numpy()
+        )
+    }
 
     # new_lines_gdfの端点座標を抽出 -> StartNode、EndNodeをNodeIDに基づいて上書き
-    for idx, line in new_lines_gdf.iterrows():
-        # ラインの始点と終点の座標を取得
-        start_coords = tuple(line.geometry.coords[0])
-        end_coords = tuple(line.geometry.coords[-1])
-
-        # 始点・終点の座標を NodeID 辞書で検索して、それぞれの NodeID を取得
-        start_node_id = node_id_dict.get(start_coords, None)
-        end_node_id = node_id_dict.get(end_coords, None)
-
-        # StartNode と EndNode を new_lines_gdf に上書き
-        new_lines_gdf.loc[idx, 'StartNode'] = start_node_id
-        new_lines_gdf.loc[idx, 'EndNode'] = end_node_id
-
-    new_lines_gdf.loc[:, 'StartNode'] = new_lines_gdf['StartNode'].astype(int)
-    new_lines_gdf.loc[:, 'EndNode'] = new_lines_gdf['EndNode'].astype(int)
+    geometries = new_lines_gdf.geometry.values
+    start_nodes = np.fromiter(
+        (node_id_dict.get(tuple(line.coords[0]), -1) for line in geometries),
+        dtype=np.int64,
+        count=len(geometries),
+    )
+    end_nodes = np.fromiter(
+        (node_id_dict.get(tuple(line.coords[-1]), -1) for line in geometries),
+        dtype=np.int64,
+        count=len(geometries),
+    )
+    if (start_nodes < 0).any() or (end_nodes < 0).any():
+        raise ValueError("Line endpoint does not map to a mesh node")
+    new_lines_gdf["StartNode"] = start_nodes
+    new_lines_gdf["EndNode"] = end_nodes
 
     return new_points_gdf, new_lines_gdf
 
@@ -2213,6 +2837,7 @@ def find_connected_point(line, point, new_points_gdf):
         NodeID = line['StartNode']
     return connected_point, NodeID
 
+_subphase_t0 = time.perf_counter()
 Point05_6, Line05_6 = angle_filtering(Point05_5, Line05_5, angle_threshold=8.0)
 
 # 繰り返し回数のカウンタ
@@ -2235,12 +2860,14 @@ while True:
 
 # Point05_6_2.to_file(f"{output_folder}/05_9_Point.gpkg", layer='point', driver="GPKG")
 # Line05_6_2.to_file(f"{output_folder}/05_10_Line.gpkg", layer='line', driver="GPKG")
+timing_record("angle_filter", time.perf_counter() - _subphase_t0)
 
 # ============================================================================
 # フェーズ8: 最終ポリゴン生成とダミーメッシュ処置 (06-06_2)
 # ============================================================================
 
 # 06: 角度フィルタリング後のエッジから最終ポリゴン生成
+_subphase_t0 = time.perf_counter()
 Poly06 = process_line_to_polygons(Line05_6_2)
 
 if enable_merge_small_polygons:
@@ -2562,6 +3189,8 @@ Poly06['CN'] = range(1, len(Poly06) + 1)
 
 # Poly06.to_file(f"{output_folder}/06_2_Poly.gpkg", layer='poly', driver="GPKG")
 print('06_2 (Poly): ',Poly06.geom_type.value_counts()) # ジオメトリタイプを確認
+timing_record("final_polygonize", time.perf_counter() - _subphase_t0)
+timing_record("topology_cleanup", time.perf_counter() - _phase_t0)
 
 def polygon_to_nodes_and_edges_with_attributes(polygon_gdf, precision=4):
     """
@@ -2717,7 +3346,8 @@ def polygon_to_nodes_and_edges_with_attributes(polygon_gdf, precision=4):
 
     return points_gdf, lines_gdf
 
-Point06, Line06 = polygon_to_nodes_and_edges_with_attributes(Poly06, precision=4) # ここのPointデータは不使用
+with stage("polygon_to_nodes_and_edges"):
+    Point06, Line06 = polygon_to_nodes_and_edges_with_attributes(Poly06, precision=4) # ここのPointデータは不使用
 
 # LN追加（LineIDと同じ値を使用：重複除去済み）
 Line06['LN'] = Line06['LineID']
@@ -2815,7 +3445,9 @@ def label_lines_robust(Line06: gpd.GeoDataFrame,
 
     return g
 
+_phase_t0 = time.perf_counter()
 Line06 = label_lines_robust(Line06, Poly06, tol_outer=0.20, tol_int=0.20, outer_ratio=0.90, interface_ratio=0.70)
+timing_record("line_label", time.perf_counter() - _phase_t0)
 
 # 重複チェック：同じCN+LNの組み合わせが複数ある場合は1つに統合
 print(f"\n=== Line06の重複チェック ===")
@@ -2898,43 +3530,51 @@ def raster_sampling(gdf, raster_file, column_prefix):
             gdf_temp = gdf.to_crs(raster_crs)
         else:
             gdf_temp = gdf.copy()
+        # Endpoint extraction preserves duplicate line indices. Positional
+        # sampling must use a unique RangeIndex or .at creates ghost rows.
+        gdf_temp = gdf_temp.reset_index(drop=True)
 
-        # サンプリング処理
-        for idx, row in gdf_temp.iterrows():
-            geom = row.geometry
-            
+        col_name = f'{column_prefix}_mean'
+        sampled_values = np.full(len(gdf_temp), np.nan, dtype=np.float64)
+
+        # Point ジオメトリは rasterio.sample をバッチ実行
+        geometries = gdf_temp.geometry.values
+        point_indices = np.fromiter(
+            (
+                idx for idx, geom in enumerate(geometries)
+                if geom is not None and not geom.is_empty and geom.geom_type == "Point"
+            ),
+            dtype=np.int64,
+        )
+        if point_indices.size:
+            coords = (
+                (geometries[i].x, geometries[i].y)
+                for i in point_indices
+            )
+            sampled = np.asarray(
+                [sample[0] for sample in src.sample(coords)], dtype=np.float64
+            )
+            if src.nodata is not None:
+                sampled[sampled == src.nodata] = np.nan
+            sampled_values[point_indices] = sampled
+
+        for idx, geom in enumerate(geometries):
+            if geom is None or geom.is_empty or geom.geom_type == "Point":
+                continue
+
             try:
-                # Pointジオメトリの場合はsampleメソッドを使う
-                if geom.geom_type == 'Point':
-                    # ポイント座標でサンプリング
-                    coords = [(geom.x, geom.y)]
-                    values = list(src.sample(coords))
-                    if len(values) > 0:
-                        value = values[0][0]
-                        if value != src.nodata:
-                            gdf_temp.at[idx, f'{column_prefix}_mean'] = value
-                        else:
-                            gdf_temp.at[idx, f'{column_prefix}_mean'] = np.nan
+                out_image, _ = rasterio.mask.mask(src, [geom.__geo_interface__], crop=True)
+                out_image = out_image[0]
+                valid_pixels = out_image[out_image != src.nodata]
+                if valid_pixels.size > 0:
+                    if use_native:
+                        stats = _mknative.elevation_stats(valid_pixels.astype(np.float64))
+                        sampled_values[idx] = stats["mean"]
                     else:
-                        gdf_temp.at[idx, f'{column_prefix}_mean'] = np.nan
-                else:
-                    # Polygon/LineStringの場合はmaskメソッドを使う
-                    geom_interface = [geom.__geo_interface__]
-                    out_image, out_transform = rasterio.mask.mask(src, geom_interface, crop=True)
-                    out_image = out_image[0]  # 1バンド目を取得
-
-                    # 有効なピクセル値を取得
-                    valid_pixels = out_image[out_image != src.nodata]
-
-                    if valid_pixels.size > 0:
-                        mean_value = np.mean(valid_pixels)
-                        gdf_temp.at[idx, f'{column_prefix}_mean'] = mean_value
-                    else:
-                        gdf_temp.at[idx, f'{column_prefix}_mean'] = np.nan
-            except (ValueError, rasterio.errors.WindowError) as e:
-                # ジオメトリがラスタ範囲外の場合はスキップ
+                        sampled_values[idx] = float(np.mean(valid_pixels))
+            except (ValueError, rasterio.errors.WindowError):
                 print(f"Warning: ジオメトリ {idx} がラスタ範囲外です。NaNを設定します。")
-                gdf_temp.at[idx, f'{column_prefix}_mean'] = np.nan
+        gdf_temp[col_name] = sampled_values
 
     # カラム名を短縮 (10文字以内) に変更
     gdf_temp = gdf_temp.rename(columns={f'{column_prefix}_mean': f'{column_prefix}_mn'})
@@ -2947,6 +3587,7 @@ def raster_sampling(gdf, raster_file, column_prefix):
 
     return gdf_result
 
+_phase_t0 = time.perf_counter()
 Point06 = raster_sampling(Point06, input_dem, 'merge1')
 # Point06.to_file(f"{output_folder}/06_5_Point.gpkg", layer='point', driver="GPKG")
 
@@ -2955,6 +3596,7 @@ Point07 = Line06.copy()
 Point07['geometry'] = Line06.centroid
 
 Point07 = raster_sampling(Point07, input_dem, 'merge2')
+timing_record("endpoint_elevation", time.perf_counter() - _phase_t0)
 
 # Point07.to_file(f"{output_folder}/07_Point.gpkg", layer='point', driver="GPKG")
 print('07: ',Point07.geom_type.value_counts()) # ジオメトリタイプを確認
@@ -2989,8 +3631,11 @@ else:
     print("✓ 重複なし")
 
 edge_gpkg_path = f"{output_folder}/edge.gpkg"
-Line06_with_merge2.to_file(edge_gpkg_path, layer='line', driver="GPKG")
-print(f"✅ edge.gpkg を保存しました: {edge_gpkg_path}")
+if block_index is None:
+    Line06_with_merge2.to_file(edge_gpkg_path, layer='line', driver="GPKG")
+    print(f"✅ edge.gpkg を保存しました: {edge_gpkg_path}")
+else:
+    print("Info: block mode - edge.gpkg skipped (edge.csv only)")
 
 # 08: 属性の結合(key: LN)
 print(f"\n=== Point08作成前の行数確認 ===")
@@ -3059,6 +3704,7 @@ print('08: ',Point08.geom_type.value_counts()) # ジオメトリタイプを確�
 # ============================================================================
 
 # 09: 建物形状の抽出（ターゲットポリゴンとの交差処理）
+_phase_t0 = time.perf_counter()
 def intersection(gdf_input, gdf_overlay):
     """建物データとターゲットポリゴンの交差部分を抽出する関数"""
     gdf_input = gdf_input.to_crs(gdf_overlay.crs)  # CRSを統一
@@ -3071,7 +3717,10 @@ def intersection(gdf_input, gdf_overlay):
 
 # 建物データの読み込みと交差処理（オプショナル）
 if BIL_directory is not None:
-    input_BIL = gpd.read_file(BIL_directory)
+    if block_index is not None:
+        input_BIL = read_vector_bbox(BIL_directory, block_bbox, input_gdf.crs)
+    else:
+        input_BIL = gpd.read_file(BIL_directory)
     
     Poly09 = intersection(input_BIL, Poly06)  # 建物データとターゲット領域の交差
     # Poly09.to_file(f"{output_folder}/09_Poly.gpkg", layer='poly', driver="GPKG")
@@ -3097,6 +3746,7 @@ else:
     Poly10['ratio'] = 0.0
 # Poly10.to_file(f"{output_folder}/10_Poly.gpkg", layer='poly', driver="GPKG")
 print('10: ',Poly10.geom_type.value_counts()) # ジオメトリタイプを確認
+timing_record("building_intersection", time.perf_counter() - _phase_t0)
 
 # 10_2: セル地盤高の算定
 def calculate_elevation(gdf, dem_tif, stat_type="median"):
@@ -3136,27 +3786,66 @@ def calculate_elevation(gdf, dem_tif, stat_type="median"):
     if not CRS(gdf.crs).equals(CRS(raster_crs)):
         gdf = gdf.to_crs(raster_crs)
 
-    # 平均値と中央値を計算（小さいポリゴンも含めるため all_touched=True）
-    stats = zonal_stats(
-        gdf, dem_tif,
-        stats=['mean', 'median'],  # 平均値と中央値を取得
-        nodata=nodata_value,  # NoData を考慮
-        all_touched=True  # 小さいポリゴンもピクセルを取得
-    )
+    stat_label = "平均値" if stat_type == "mean" else "中央値"
 
-    # 指定された統計量を使用（Null の場合はもう一方、それもなければ0）
-    if stat_type == "mean":
-        gdf['_median'] = [
-            s['mean'] if s['mean'] is not None else s['median'] if s['median'] is not None else 0
-            for s in stats
-        ]
-        stat_label = "平均値"
-    else:  # median
-        gdf['_median'] = [
-            s['median'] if s['median'] is not None else s['mean'] if s['mean'] is not None else 0
-            for s in stats
-        ]
-        stat_label = "中央値"
+    if use_native:
+        elevations = []
+        with rasterio.open(dem_tif) as src:
+            nodata = src.nodata if src.nodata is not None else -9999
+            for geom in gdf.geometry:
+                if geom is None or geom.is_empty:
+                    elevations.append(0.0)
+                    continue
+                if not geom.is_valid:
+                    geom = geom.buffer(0)
+                try:
+                    out_image, _ = rio_mask.mask(
+                        src, [mapping(geom)], crop=True,
+                        nodata=nodata, all_touched=True,
+                    )
+                except ValueError:
+                    elevations.append(0.0)
+                    continue
+                band = out_image[0]
+                if np.issubdtype(band.dtype, np.floating):
+                    valid = (band != nodata) & (~np.isnan(band))
+                else:
+                    valid = (band != nodata)
+                vals = band[valid]
+                if vals.size == 0:
+                    elevations.append(0.0)
+                    continue
+                stats = _mknative.elevation_stats(vals.astype(np.float64))
+                if stat_type == "mean":
+                    elevations.append(
+                        stats["mean"] if stats["mean"] is not None else stats["median"]
+                    )
+                else:
+                    elevations.append(
+                        stats["median"] if stats["median"] is not None else stats["mean"]
+                    )
+        gdf['_median'] = elevations
+        print(f"標高計算: native C ({stat_label})", flush=True)
+    else:
+        # 平均値と中央値を計算（小さいポリゴンも含めるため all_touched=True）
+        stats = zonal_stats(
+            gdf, dem_tif,
+            stats=['mean', 'median'],  # 平均値と中央値を取得
+            nodata=nodata_value,  # NoData を考慮
+            all_touched=True  # 小さいポリゴンもピクセルを取得
+        )
+
+        # 指定された統計量を使用（Null の場合はもう一方、それもなければ0）
+        if stat_type == "mean":
+            gdf['_median'] = [
+                s['mean'] if s['mean'] is not None else s['median'] if s['median'] is not None else 0
+                for s in stats
+            ]
+        else:  # median
+            gdf['_median'] = [
+                s['median'] if s['median'] is not None else s['mean'] if s['mean'] is not None else 0
+                for s in stats
+            ]
 
     print(f"\n=== 標高データの統計（{stat_label}使用） ===")
     print(f"最小標高: {gdf['_median'].min():.2f} m")
@@ -3170,7 +3859,8 @@ def calculate_elevation(gdf, dem_tif, stat_type="median"):
 
     return gdf
 
-Poly10 = calculate_elevation(Poly10, input_dem, elevation_stat)
+with stage("calculate_elevation"):
+    Poly10 = calculate_elevation(Poly10, input_dem, elevation_stat)
 # Poly10.to_file(f"{output_folder}/10_2_Poly.gpkg", layer='poly', driver="GPKG")
 print('10_2: ',Poly10.geom_type.value_counts()) # ジオメトリタイプを確認
 
@@ -3186,6 +3876,88 @@ def area_in_square_meters(geom, crs):
     geod = crs_obj.get_geod() if hasattr(crs_obj, "get_geod") else Geod(ellps="WGS84")
     area_m2, _ = geod.geometry_area_perimeter(geom)
     return abs(float(area_m2))
+
+
+def _mask_polygon_band(src, geom, nodata_value):
+    """Mask a single polygon to a 1-band raster window."""
+    if geom is None or geom.is_empty:
+        return None, None, None
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+    try:
+        out_image, out_transform = rio_mask.mask(
+            src, [mapping(geom)], crop=True,
+            nodata=nodata_value, all_touched=True,
+        )
+    except ValueError:
+        return None, None, None
+    return out_image[0], out_transform, geom
+
+
+def _valid_pixels_and_codes(band, nodata_value):
+    if band is None:
+        return None, None
+    if np.issubdtype(band.dtype, np.floating):
+        valid = (band != nodata_value) & (~np.isnan(band))
+    else:
+        valid = (band != nodata_value)
+    rows, cols = np.where(valid)
+    if rows.size == 0:
+        return None, None
+    vals = band[rows, cols]
+    if np.issubdtype(vals.dtype, np.floating):
+        vals = np.rint(vals).astype(np.int32)
+    else:
+        vals = vals.astype(np.int32)
+    return vals, valid
+
+
+def _accumulate_code_areas_native(vals, pixel_area, min_code, max_code):
+    areas_arr = _mknative.accumulate_codes(
+        vals, np.full(vals.shape, pixel_area, dtype=np.float64), min_code, max_code,
+    )
+    return {str(i + min_code): areas_arr[i] for i in range(len(areas_arr)) if areas_arr[i] > 0.0}
+
+
+def _accumulate_code_areas_fast(vals, pixel_area, min_code, max_code):
+    """Pixel-centre area sum (mask already clips to polygon). Fast for coarse rasters."""
+    vals_arr = np.asarray(vals, dtype=np.int32)
+    in_range = (vals_arr >= min_code) & (vals_arr <= max_code)
+    if not in_range.any():
+        return {}
+    clipped = vals_arr[in_range]
+    counts = np.bincount(clipped - min_code, minlength=max_code - min_code + 1)
+    return {
+        str(code): float(counts[code - min_code] * pixel_area)
+        for code in range(min_code, max_code + 1)
+        if counts[code - min_code] > 0
+    }
+
+
+def _accumulate_code_areas(vals, pixel_area, min_code, max_code, xs, ys, geom, raster_crs, half_w, half_h):
+    if use_native:
+        return _accumulate_code_areas_native(vals, pixel_area, min_code, max_code)
+    if raster_area_mode == "exact":
+        return _accumulate_code_areas_exact(
+            vals, xs, ys, geom, raster_crs, half_w, half_h, min_code, max_code,
+        )
+    return _accumulate_code_areas_fast(vals, pixel_area, min_code, max_code)
+
+
+def _accumulate_code_areas_exact(vals, xs, ys, geom, raster_crs, half_w, half_h, min_code, max_code):
+    prep_poly = prepared.prep(geom)
+    pixel_areas = defaultdict(float)
+    for v, x, y in zip(vals.tolist(), xs, ys):
+        if v < min_code or v > max_code:
+            continue
+        cell = box(x - half_w, y - half_h, x + half_w, y + half_h)
+        if not prep_poly.intersects(cell):
+            continue
+        inter_geom = geom.intersection(cell)
+        inter_area = area_in_square_meters(inter_geom, raster_crs)
+        if inter_area > 0.0:
+            pixel_areas[str(v)] += inter_area
+    return pixel_areas
 
 
 def calculate_raster_overlap_area_with_majority(gdf, landuse_tif, output_csv, fallback_epsg=None):
@@ -3219,79 +3991,41 @@ def calculate_raster_overlap_area_with_majority(gdf, landuse_tif, output_csv, fa
             gdf_proc = gdf
 
         results = []
+        pixel_area = abs(pixel_width * pixel_height)
+        geometries = gdf_proc.geometry.values
 
-        for _, row in gdf_proc.iterrows():
-            geom = row.geometry
+        for row_idx, geom in enumerate(geometries):
+            row = gdf_proc.iloc[row_idx]
             if geom is None or geom.is_empty:
                 record = row.to_dict()
                 record["_majority"] = int(nodata_value)
                 results.append(record)
                 continue
 
-            # 形状が壊れている場合に備え軽く修正（面積は不変）
-            if not geom.is_valid:
-                geom = geom.buffer(0)
+            band, out_transform, geom = _mask_polygon_band(src, geom, nodata_value)
+            vals, valid_mask = _valid_pixels_and_codes(band, nodata_value)
+            if vals is None:
+                record = row.to_dict()
+                record["_majority"] = int(nodata_value)
+                results.append(record)
+                continue
 
-            try:
-                # ここで必要最小のウィンドウだけ読み込まれる（reopenしない）
-                out_image, out_transform = rio_mask.mask(
-                    src, [mapping(geom)], crop=True,
-                    nodata=nodata_value, all_touched=True
+            if use_native:
+                pixel_areas = _accumulate_code_areas_native(vals, pixel_area, 0, 255)
+            else:
+                rows, cols = np.where(valid_mask)
+                xs, ys = rasterio.transform.xy(out_transform, rows, cols)
+                pixel_areas = _accumulate_code_areas(
+                    vals, pixel_area, 0, 255, xs, ys, geom, raster_crs, half_w, half_h,
                 )
-            except ValueError:
-                # 「Input shapes do not overlap raster.」等はここに来る
-                record = row.to_dict()
-                record["_majority"] = int(nodata_value)
-                results.append(record)
-                continue
-
-            band = out_image[0]  # 1バンド想定
-            # dtype が整数のときに np.isnan は使わない
-            if np.issubdtype(band.dtype, np.floating):
-                valid = (band != nodata_value) & (~np.isnan(band))
-            else:
-                valid = (band != nodata_value)
-
-            rows, cols = np.where(valid)
-            if rows.size == 0:
-                record = row.to_dict()
-                record["_majority"] = int(nodata_value)
-                results.append(record)
-                continue
-
-            # ピクセル中心座標
-            xs, ys = rasterio.transform.xy(out_transform, rows, cols)
-
-            # 交差判定の高速化
-            prep_poly = prepared.prep(geom)
-
-            from collections import defaultdict
-            pixel_areas = defaultdict(float)
-
-            # 値とセル形状の交差面積を集計
-            vals = band[rows, cols]
-            # Pythonのdictキーは int に揃える（列名化のため）
-            if np.issubdtype(vals.dtype, np.floating):
-                vals = np.rint(vals).astype(int)
-            else:
-                vals = vals.astype(int)
-
-            for v, x, y in zip(vals.tolist(), xs, ys):
-                cell = box(x - half_w, y - half_h, x + half_w, y + half_h)
-                if not prep_poly.intersects(cell):
-                    continue
-                inter_geom = geom.intersection(cell)
-                inter_area = area_in_square_meters(inter_geom, raster_crs)
-                if inter_area > 0.0:
-                    pixel_areas[v] += inter_area
 
             if pixel_areas:
-                max_pixel_value = max(pixel_areas, key=pixel_areas.get)
+                max_pixel_value = int(max(pixel_areas, key=pixel_areas.get))
             else:
                 max_pixel_value = int(nodata_value)
 
             record = row.to_dict()
-            record.update(pixel_areas)     # 値ごとの重なり面積を列として追加
+            record.update(pixel_areas)
             record["_majority"] = int(max_pixel_value)
             results.append(record)
 
@@ -3349,7 +4083,8 @@ def calculate_raster_overlap_area_with_majority(gdf, landuse_tif, output_csv, fa
 input_LandUse  = os.path.abspath(os.path.expanduser(LandUse_directory))
 # output_csv = f"{output_folder}/polygon_raster_coverage.csv"  # 出力するCSV（不要のためコメントアウト）
 
-Poly11 = calculate_raster_overlap_area_with_majority(Poly10, input_LandUse, output_csv=None)
+with stage("calculate_landuse"):
+    Poly11 = calculate_raster_overlap_area_with_majority(Poly10, input_LandUse, output_csv=None)
 
 def calculate_soil_area(gdf, soil_tif, fallback_epsg=None):
     """
@@ -3376,61 +4111,29 @@ def calculate_soil_area(gdf, soil_tif, fallback_epsg=None):
 
         required_soil_codes = [str(code) for code in range(1, 18)]
         results = []
+        pixel_area = abs(pixel_width * pixel_height)
+        geometries = gdf_proc.geometry.values
 
-        for _, row in gdf_proc.iterrows():
-            geom = row.geometry
+        for row_idx, geom in enumerate(geometries):
+            row = gdf_proc.iloc[row_idx]
             record = row.to_dict()
-
             for code in required_soil_codes:
                 record[f"soil_{code}_area"] = 0.0
 
-            if geom is None or geom.is_empty:
+            band, out_transform, geom = _mask_polygon_band(src, geom, nodata_value)
+            vals, valid_mask = _valid_pixels_and_codes(band, nodata_value)
+            if vals is None:
                 results.append(record)
                 continue
 
-            if not geom.is_valid:
-                geom = geom.buffer(0)
-
-            try:
-                out_image, out_transform = rio_mask.mask(
-                    src, [mapping(geom)], crop=True,
-                    nodata=nodata_value, all_touched=True
+            if use_native:
+                soil_area_by_code = _accumulate_code_areas_native(vals, pixel_area, 1, 17)
+            else:
+                rows, cols = np.where(valid_mask)
+                xs, ys = rasterio.transform.xy(out_transform, rows, cols)
+                soil_area_by_code = _accumulate_code_areas(
+                    vals, pixel_area, 1, 17, xs, ys, geom, raster_crs, half_w, half_h,
                 )
-            except ValueError:
-                results.append(record)
-                continue
-
-            band = out_image[0]
-            if np.issubdtype(band.dtype, np.floating):
-                valid = (band != nodata_value) & (~np.isnan(band))
-            else:
-                valid = (band != nodata_value)
-
-            rows, cols = np.where(valid)
-            if rows.size == 0:
-                results.append(record)
-                continue
-
-            xs, ys = rasterio.transform.xy(out_transform, rows, cols)
-            prep_poly = prepared.prep(geom)
-
-            vals = band[rows, cols]
-            if np.issubdtype(vals.dtype, np.floating):
-                vals = np.rint(vals).astype(int)
-            else:
-                vals = vals.astype(int)
-
-            soil_area_by_code = defaultdict(float)
-            for v, x, y in zip(vals.tolist(), xs, ys):
-                if v < 1 or v > 17:
-                    continue
-                cell = box(x - half_w, y - half_h, x + half_w, y + half_h)
-                if not prep_poly.intersects(cell):
-                    continue
-                inter_geom = geom.intersection(cell)
-                inter_area = area_in_square_meters(inter_geom, raster_crs)
-                if inter_area > 0.0:
-                    soil_area_by_code[str(v)] += inter_area
 
             for code, area_value in soil_area_by_code.items():
                 record[f"soil_{code}_area"] = area_value
@@ -3462,7 +4165,8 @@ def calculate_soil_area(gdf, soil_tif, fallback_epsg=None):
     return gdf_result
 
 input_Soil = os.path.abspath(os.path.expanduser(Soil_directory))
-Poly11 = calculate_soil_area(Poly11, input_Soil, fallback_epsg=Soil_epsg)
+with stage("calculate_soil"):
+    Poly11 = calculate_soil_area(Poly11, input_Soil, fallback_epsg=Soil_epsg)
 
 # 保存前のカラム確認
 print(f"\n=== 11_Poly.gpkg 保存前の確認 ===")
@@ -3476,6 +4180,7 @@ print('11: ',Poly11.geom_type.value_counts()) # ジオメトリタイプを確�
 
 # face.gpkgとして保存（11_Poly.gpkgのコピー）
 # 平面直角座標系では反時計回り（CCW）が標準なので、ポリゴンを修正
+_phase_t0 = time.perf_counter()
 def ensure_ccw_polygon(geom):
     """ポリゴンを反時計回り（CCW）に修正"""
     from shapely.geometry import Polygon, MultiPolygon, LinearRing
@@ -3504,8 +4209,11 @@ def ensure_ccw_polygon(geom):
 
 Poly11['geometry'] = Poly11['geometry'].apply(ensure_ccw_polygon)
 face_gpkg_path = f"{output_folder}/face.gpkg"
-Poly11.to_file(face_gpkg_path, layer='poly', driver="GPKG")
-print(f"✅ face.gpkg を保存しました（反時計回りに修正済み）: {face_gpkg_path}")
+if block_index is None:
+    Poly11.to_file(face_gpkg_path, layer='poly', driver="GPKG")
+    print(f"✅ face.gpkg を保存しました（反時計回りに修正済み）: {face_gpkg_path}")
+else:
+    print("Info: block mode - face.gpkg skipped (wkt in face.csv)")
 
 # # 保存後の確認（読み込んで検証）
 # Poly11_verify = gpd.read_file(f"{output_folder}/11_Poly.gpkg", layer='poly')
@@ -3625,6 +4333,23 @@ else:
 # edge.csvを出力（Point08の内容をそのまま使用）
 df_edge = Point08[existing_columns].copy()
 
+edge_key_columns = ['CN', 'LN', 'xcoord', 'ycoord', 'node_id']
+null_counts = df_edge[edge_key_columns].isna().sum()
+if int(null_counts.sum()) != 0:
+    raise ValueError(f"edge.csv key columns contain NaN: {null_counts.to_dict()}")
+edge_group_sizes = df_edge.groupby(['CN', 'LN'], sort=False).size()
+invalid_edge_groups = edge_group_sizes[edge_group_sizes != 2]
+if len(invalid_edge_groups):
+    raise ValueError(
+        f"edge.csv requires exactly 2 endpoint rows per CN+LN; "
+        f"invalid groups={len(invalid_edge_groups)}"
+    )
+node_elevation_counts = df_edge.groupby('node_id', sort=False)['merge1_mn'].nunique(
+    dropna=False
+)
+if int(node_elevation_counts.max()) != 1:
+    raise ValueError("merge1_mn must be unique for every node_id")
+
 print(f"\n=== edge.csv出力情報 ===")
 print(f"出力カラム: {list(df_edge.columns)}")
 print(f"出力行数: {len(df_edge)}")
@@ -3700,6 +4425,13 @@ new_column_order = base_columns + landuse_cols + soil_area_cols
 existing_columns = [col for col in new_column_order if col in df_face.columns]
 df_face = df_face[existing_columns]
 
+if block_index is not None:
+    df_face = df_face.copy()
+    face_geometry = Poly11
+    if not CRS(Poly11.crs).equals(CRS(input_gdf.crs)):
+        face_geometry = Poly11.to_crs(input_gdf.crs)
+    df_face["wkt"] = face_geometry.geometry.to_wkt()
+
 print(f"\n=== face.csv 出力情報 ===")
 print(f"総カラム数: {len(df_face.columns)}")
 print(f"土地利用面積カラム数: {len(landuse_cols)}")
@@ -3714,3 +4446,9 @@ print(f"カラム順序: {df_face.columns.tolist()}")
 face_csv_path = os.path.join(output_folder, 'face.csv')
 df_face.to_csv(face_csv_path, encoding='utf-8', index=False)
 print(f"✅ face.csvを出力しました: {face_csv_path}")
+
+timing_record("final_output", time.perf_counter() - _phase_t0)
+timing_summary(
+    f"01_mkINPUT block={block_index if block_index is not None else 'all'} "
+    f"total={time.perf_counter() - _pipeline_t0:.2f}s"
+)
