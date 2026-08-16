@@ -45,8 +45,15 @@ parallel:
 parameters:
   merge_small_polygons: true
   area_threshold: 10.0
+  min_face_area: 625.0   # この面積以下 [m²] の面は隣接面へ結合（0で無効）
   raster_area_mode: fast
   elevation_stat: "median"
+  # 第1段階後処理 (04_refine_elevation_by_landuse.py) 用
+  elevation_stat_by_landuse:
+    enabled: true
+    low_codes: [50, 60]   # 森林・荒地 → 谷筋側に代表標高を寄せる
+    low_stat: "p10"
+    min_area_ratio: 0.5    # 優占土地利用面積比
   native:
     enabled: false
     omp_threads: 4
@@ -69,11 +76,11 @@ parameters:
     qt_max_depth: 3
     qt_min_area: 625.0
     qt_min_dem_samples: "all"
-    # 土地利用で最大分割レベルを切替（root=200m 時: depth3=25m, depth2=50m）
+    # 土地利用で最大分割レベルを切替（root=200m 時: depth3=25m, depth2=50m, depth1=200m）
     qt_landuse_depth:
       enabled: true
       fine_max_depth: 3
       coarse_max_depth: 1
       default_max_depth: 2
-      fine_codes: [70, 91, 92, 150, 160]
-      coarse_codes: [10, 20, 50, 60]
+      fine_codes: [50, 60, 70, 91, 92, 150, 160]  # 森林・荒地含む細分割
+      coarse_codes: [10, 20]                        # 平坦な農地のみ粗分割

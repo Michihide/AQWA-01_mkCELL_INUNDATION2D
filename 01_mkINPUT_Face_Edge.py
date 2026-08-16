@@ -227,6 +227,7 @@ Soil_epsg = config["input"]["soil"]["epsg"]
 
 # パラメータ設定
 area_threshold = config["parameters"]["area_threshold"]
+min_face_area = float(config["parameters"].get("min_face_area", 625.0))
 enable_merge_small_polygons = bool(config["parameters"].get("merge_small_polygons", False))
 elevation_stat = config["parameters"].get("elevation_stat", "median")  # デフォルトは中央値
 refinement = config["parameters"].get("refinement", {})
@@ -330,6 +331,7 @@ print(f"標高統計量: {elevation_stat}")
 print(f"一次再分割手法: {primary_refine_method}")
 print(f"二次再分割手法: {secondary_refine_method}")
 print(f"enable_aspect_refinement={enable_aspect_refinement}, merge_small_polygons={enable_merge_small_polygons}")
+print(f"min_face_area={min_face_area} m² (≤この面積の面は隣接面へ結合、0で無効)")
 print(f"hex_diameter={hex_diameter}, hex_area_threshold={hex_area_threshold}")
 if primary_refine_method == "quadtree_std":
     print(f"quadtree: std>{qt_std_threshold}, relief>{qt_relief_threshold}, max_depth={qt_max_depth}, min_area={qt_min_area}, min_samples={qt_min_dem_samples}")
@@ -673,6 +675,19 @@ def merge_small_polygons(gdf: gpd.GeoDataFrame, threshold=None) -> gpd.GeoDataFr
         gdf,
         lambda geom: float(geom.area) < threshold,
         label=f"小ポリゴン(<{threshold}m²)",
+    )
+
+
+def merge_polygons_at_or_below_min_area(
+    gdf: gpd.GeoDataFrame, min_area: float
+) -> gpd.GeoDataFrame:
+    """面積が min_area 以下のポリゴンを隣接面へ結合する（非隣接への結合は行わない）。"""
+    if min_area <= 0:
+        return gdf
+    return _merge_into_neighbors(
+        gdf,
+        lambda geom: float(geom.area) <= min_area,
+        label=f"最小面積以下(≤{min_area}m²)",
     )
 
 # 微小ポリゴンマージの実行
@@ -2115,6 +2130,11 @@ else:
             merged_lines_path=None,
             polygonized_path=None)
 
+if min_face_area > 0:
+    n_before = len(Poly05_5)
+    Poly05_5 = merge_polygons_at_or_below_min_area(Poly05_5, min_face_area)
+    print(f"05_5(min_face_area): {n_before} -> {len(Poly05_5)} 面", flush=True)
+
 # Poly05_5.to_file(f"{output_folder}/05_5_Poly.gpkg", layer='poly', driver="GPKG")
 print('05_5: ',Poly05_5.geom_type.value_counts()) # ジオメトリタイプを確認
 _phase_t0 = time.perf_counter()
@@ -2874,6 +2894,11 @@ if enable_merge_small_polygons:
     Poly06 = merge_small_polygons(Poly06)
 else:
     print("06: merge_small_polygons=false のため小ポリゴン結合をスキップ", flush=True)
+
+if min_face_area > 0:
+    n_before = len(Poly06)
+    Poly06 = merge_polygons_at_or_below_min_area(Poly06, min_face_area)
+    print(f"06(min_face_area): {n_before} -> {len(Poly06)} 面", flush=True)
 
 # ===== ユーティリティ =====
 # 形状の妥当化（Shapely 2.x があれば make_valid、なければ buffer(0)）
