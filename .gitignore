@@ -1,18 +1,32 @@
-# メッシュ生成物
+# メッシュ生成物・大容量データ
 Cell/
-_regression_snapshots/
-mesh_generator/output_*/
-mesh_generator/testdata/output_mesh/
+mesh_bundle/
+*.zip
+
+# 旧パイプライン退避先の生成物
+legacy/_regression_snapshots/
+legacy/mesh_generator/output_*/
+legacy/mesh_generator/testdata/output_mesh/
 
 # 大容量入力データ（ローカル配置）
 OpenStreetMap/
 *.tif
 *.tif.aux.xml
+*.bin
 
-# ビルド生成物
-native/*.o
-native/*.dylib
+# Gmsh ツールの実行出力
+tool/output/
+**/output_gmsh_test/
+**/output_gmsh_tool/
+**/output_gpkg_csv/
+**/blocks/
+**/block_logs/
+
+# ビルド・キャッシュ
+legacy/native/*.o
+legacy/native/*.dylib
 __pycache__/
 *.pyc
+.pytest_cache/
 
 .DS_Store

@@ -1,0 +1,110 @@
+# 球磨川・人吉地区 — 開発・検証用設定
+#
+# 方針（境界四角形重視）:
+#   - 外周帯 25×25 m Transfinite + optimize オフ + min_width_ratio 0.5
+#   - 内部 min_element_area 200 m² / global_min_size 25 m
+#   - 境界四角形(25 m)と内部目標スケールは独立: interface_size は Γ1 近傍の下限のみ
+#     （旧: interface_size=30 + 半径30 m の floor で内部まで細かく伝播していた）
+#
+# 1 ブロック試験:
+#   cd tool && nix develop -c python run.py --config config/kuma_hitoyoshi.yaml \
+#     --blocks --block-indices 0 --workers 1
+
+# --- 入力 ---
+input:
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
+  domain_min_area: 0
+  polygon_filter: null
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
+  breaklines:
+    embankments: ../data/kuma_embankments.gpkg
+
+# --- 座標系 ---
+crs:
+  target_epsg: 6670
+
+# --- メッシュ ---
+mesh:
+  min_element_area: 200.0     # 内部の面積下限 [m²]（√200≈14 m 正方形、正三角形換算 ≈21 m）
+  global_min_size: 25.0       # 内部目標辺長下限 [m]（外周 target_size と一致させる）
+  global_max_size: 150.0      # 平坦部の目標辺長上限 [m]
+
+  boundary_quad_band:
+    enabled: true
+    method: transfinite
+    width: 25.0               # 法線方向 [m]。target_size と揃えて正方形化
+    target_size: 25.0         # 接線方向 [m]（width と同一が理想）
+    layers: 1
+    interface_size: 45.0      # Γ1 近傍のサイズ下限（境界25 mとは独立。帯形状は変わらない）
+    interface_floor_radius: 40.0  # 下限を掛ける半径（0 なら size_field_grid）
+    min_width_ratio: 0.5        # コーナー縮小の下限（0.25 より高→台形化を抑える）
+    corner_angle_deg: 120.0
+
+  interior_quads:
+    enabled: false
+
+  max_iterations: 8           # 反復上限（8→6 で時間短縮）
+  max_refine_attempts: 1       # 同一地点の細分化 1 回まで
+  refinement_factor: 0.85      # 0.7 より弱い細分化（セル数↓）
+  max_neighbor_size_ratio: 2.0   # 1.5 だと Γ1 近傍の細かさが内部へ長く伝播する
+  size_field_grid: 40.0
+
+# --- 地形適合（DEM）---
+terrain:
+  plane_fit_rmse_max: 0.3
+  slope_direction_spread_max_deg: 60.0
+  representative_elevation_method: area_weighted_mean
+  refine_if_insufficient_dem_samples: false
+  flat_slope_threshold: 0.0005
+
+# --- 幾何品質 ---
+quality:
+  triangle_min_angle_deg: 25.0
+  triangle_radius_ratio_min: 0.30
+  triangle_aspect_ratio_max: 4.0
+  quadrilateral_aspect_ratio_max: 2.0   # 外周帯の縦横比上限（3→2 で細長四角形を検出）
+  quadrilateral_min_interior_angle_deg: 20.0
+  quadrilateral_max_interior_angle_deg: 160.0
+  quadrilateral_scaled_jacobian_min: 0.30
+
+# --- 機能フラグ ---
+features:
+  breaklines_as_mesh_edges: true
+  split_surface_by_breaklines: true
+
+# --- Gmsh ---
+gmsh:
+  algorithm_2d: 6
+  optimize: false             # true だと Laplace 平滑化で Transfinite 四角形が歪む
+  optimization_method: Laplace2D
+  verbosity: 0
+  num_threads: 1
+
+# --- 氾濫ブロック並列（--blocks） ---
+parallel:
+  enabled: true
+  workers: 8
+  min_block_area_m2: 0
+  keep_block_outputs: true
+
+# --- 出力 ---
+output:
+  directory: ../output/kuma_hitoyoshi
+  basename: kuma_mesh
+  save_diagnostics: true
+  save_iteration_meshes: false   # 反復ごとの vtu 保存オフ（時間・容量節約）
+  gpkg_csv:
+    directory: ../../Cell/Kuma_Hitoyoshi/output_gpkg_csv
+    face_gpkg: face.gpkg
+    edge_gpkg: edge.gpkg
+    face_csv: face.csv
+    edge_csv: edge.csv
+  cell_bin:
+    enabled: true
+    directory: ../../Cell/Kuma_Hitoyoshi
+    filename: Kuma_Hitoyoshi.bin
+    landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/Landuse_100m.tif
+    landuse_epsg: 6668
+    soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/japan_soil.tif
+    soil_epsg: 4326
+    buildings: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/kyushu-latest-free.shp/gis_osm_buildings_a_free_1.shp

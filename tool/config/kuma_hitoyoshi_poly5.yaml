@@ -1,0 +1,86 @@
+# 球磨川 人吉地区。開発用にポリゴン #5（24.5 km^2）だけを対象にした設定。
+#
+# polygon_filter で対象を絞れる。開発中は 1 ポリゴンだけを対象にして反復を早く回し、
+# 仕上げに polygon_filter を外して全域を生成する。
+
+input:
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
+  domain_min_area: 1000.0
+  # domain_min_area 適用後、ファイル順のインデックス。null で全 30 ポリゴン。
+  polygon_filter: [5]
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
+
+  # 精度が担保された線データのみをここに書く。メッシュ辺として拘束される。
+  # 球磨川では現時点で検証済みの堤防・法線データが無いため未指定。
+  breaklines: {}
+
+  # 位置の目安としてのみ使うレイヤ。格子の分割には一切使わない。
+  reference_layers: {}
+
+crs:
+  # JGD2011 平面直角座標系 II 系。入力の EPSG:3857 は面積が 1.4 倍に歪むため必ず変換する。
+  target_epsg: 6670
+
+mesh:
+  # 全要素の面積下限。これがハード制約。
+  min_element_area: 625.0
+  # 目標サイズの下限。正三角形換算で 45 m -> 877 m^2 なので下限を満たす。
+  global_min_size: 45.0
+  global_max_size: 150.0
+
+  boundary_quad_band:
+    enabled: true
+    method: transfinite
+    # 境界は堤防を再現する重要度が高いため、帯四角形は面積下限と同じ
+    # サイズにする。堤防の再現性を優先し、境界に接する要素には面積下限を
+    # 課さない（main.py 側の除外ロジックを参照）。
+    width: 25.0        # 内向きオフセット量。帯四角形の法線方向の辺長。
+    target_size: 25.0  # 帯の接線方向の節点間隔。25 x 25 = 625 m^2。
+    layers: 1
+    interface_size: 37.5
+    corner_angle_deg: 120.0
+
+  interior_quads:
+    enabled: false
+    mode: none
+
+  max_iterations: 12
+  refinement_factor: 0.7
+  max_neighbor_size_ratio: 1.5
+  size_field_grid: 40.0
+
+terrain:
+  plane_fit_rmse_max: 1.50
+  slope_direction_spread_max_deg: 60.0
+  representative_elevation_method: area_weighted_mean
+  minimum_dem_samples_per_element: 4
+  refine_if_insufficient_dem_samples: true
+  flat_slope_threshold: 0.01
+
+quality:
+  triangle_min_angle_deg: 25.0
+  triangle_radius_ratio_min: 0.30
+  triangle_aspect_ratio_max: 4.0
+  quadrilateral_aspect_ratio_max: 3.0
+  quadrilateral_min_interior_angle_deg: 20.0
+  quadrilateral_max_interior_angle_deg: 160.0
+  quadrilateral_scaled_jacobian_min: 0.30
+
+features:
+  breaklines_as_mesh_edges: true
+  split_surface_by_breaklines: true
+  reference_layers_for_size_field: false
+  reference_layers_in_diagnostics: true
+
+gmsh:
+  algorithm_2d: 6         # Frontal-Delaunay
+  optimize: true
+  optimization_method: Laplace2D
+  verbosity: 0
+  num_threads: 1
+
+output:
+  directory: ../output/kuma_poly5
+  basename: kuma_poly5_mesh
+  save_diagnostics: true
+  save_iteration_meshes: true

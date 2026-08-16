@@ -1,0 +1,86 @@
+# 斐伊川。1 m DEM があるため、盛り土（道路・堤防）の検出と拘束の検証に使う。
+# 球磨川の DEM は 5 m で線状構造物を判別できなかった。
+
+input:
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/input_gpkg.gpkg
+  domain_min_area: 1000.0
+  polygon_filter: null
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/DEM1M.tif
+
+  # 内部の道路・盛り土。1 m DEM から scripts/detect_embankments.py で検出したもので、
+  # 形状は DEM 由来である（OSM は種別の注記にしか使っていない）。
+  breaklines:
+    embankments: ../data/hii_embankments.gpkg
+
+  # 目安として図にだけ出す。メッシュには一切効かせない。
+  reference_layers:
+    osm_roads: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/chugoku-latest-free.shp/gis_osm_roads_free_1.shp
+
+crs:
+  # JGD2011 平面直角座標系 III 系（島根）
+  target_epsg: 6671
+
+mesh:
+  min_element_area: 100.0
+  global_min_size: 45.0
+  global_max_size: 150.0
+
+  boundary_quad_band:
+    enabled: true
+    method: transfinite
+    # 境界は堤防を再現する重要度が高いため、帯四角形は面積下限と同じ
+    # サイズ（10 x 10 = 100 m^2）にする。堤防の再現性を優先し、境界に
+    # 接する要素には面積下限を課さない（main.py 側の除外ロジックを参照）。
+    width: 10.0
+    target_size: 10.0
+    layers: 1
+    interface_size: 15.0
+    corner_angle_deg: 120.0
+
+  interior_quads:
+    enabled: false
+    mode: none
+
+  max_iterations: 12
+  max_refine_attempts: 2
+  refinement_factor: 0.7
+  max_neighbor_size_ratio: 1.5
+  size_field_grid: 40.0
+
+terrain:
+  plane_fit_rmse_max: 1.50
+  slope_direction_spread_max_deg: 60.0
+  representative_elevation_method: area_weighted_mean
+  minimum_dem_samples_per_element: 4
+  refine_if_insufficient_dem_samples: true
+  flat_slope_threshold: 0.01
+  # 1 m 原解像度だと 215 km^2 級では重い。2 m へ落とす。
+  dem_target_px_m: 2.0
+
+quality:
+  triangle_min_angle_deg: 25.0
+  triangle_radius_ratio_min: 0.30
+  triangle_aspect_ratio_max: 4.0
+  quadrilateral_aspect_ratio_max: 3.0
+  quadrilateral_min_interior_angle_deg: 20.0
+  quadrilateral_max_interior_angle_deg: 160.0
+  quadrilateral_scaled_jacobian_min: 0.30
+
+features:
+  breaklines_as_mesh_edges: true
+  split_surface_by_breaklines: true
+  reference_layers_for_size_field: false
+  reference_layers_in_diagnostics: true
+
+gmsh:
+  algorithm_2d: 6
+  optimize: true
+  optimization_method: Laplace2D
+  verbosity: 0
+  num_threads: 1
+
+output:
+  directory: ../output/hii_area100
+  basename: hii_mesh
+  save_diagnostics: true
+  save_iteration_meshes: false

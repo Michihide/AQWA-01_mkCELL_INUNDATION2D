@@ -1,0 +1,112 @@
+# 斐伊川 — 球磨川 (kuma_hitoyoshi.yaml) と同じメッシュ設定
+#
+# 球磨川との差分は入力・CRS・出力先のみ:
+#   - 1 m DEM（地形評価は 5 m 相当に間引き、球磨川 DEM と同じ実効解像度）
+#   - EPSG:6671（平面直角 III 系）
+#   - 解析領域は 1 ポリゴン（約 26.5 km²）なので --blocks は不要
+#
+#   cd tool && nix develop -c python run.py --config config/hii.yaml
+
+# --- 入力 ---
+input:
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/input_gpkg.gpkg
+  domain_min_area: 0
+  polygon_filter: null
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/DEM1M.tif
+  breaklines:
+    embankments: ../data/hii_embankments.gpkg
+  reference_layers:
+    osm_roads: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/chugoku-latest-free.shp/gis_osm_roads_free_1.shp
+
+# --- 座標系 ---
+crs:
+  target_epsg: 6671
+
+# --- メッシュ（球磨川と同じ）---
+mesh:
+  min_element_area: 200.0
+  global_min_size: 25.0
+  global_max_size: 150.0
+
+  boundary_quad_band:
+    enabled: true
+    method: transfinite
+    width: 25.0
+    target_size: 25.0
+    layers: 1
+    interface_size: 45.0
+    interface_floor_radius: 40.0
+    min_width_ratio: 0.5
+    corner_angle_deg: 120.0
+
+  interior_quads:
+    enabled: false
+
+  max_iterations: 8
+  max_refine_attempts: 1
+  refinement_factor: 0.85
+  max_neighbor_size_ratio: 2.0
+  size_field_grid: 40.0
+
+# --- 地形適合（球磨川と同じ閾値。DEM のみ 5 m 相当に落とす）---
+terrain:
+  plane_fit_rmse_max: 0.3
+  slope_direction_spread_max_deg: 60.0
+  representative_elevation_method: area_weighted_mean
+  refine_if_insufficient_dem_samples: false
+  flat_slope_threshold: 0.0005
+  dem_target_px_m: 5.0
+
+# --- 幾何品質（球磨川と同じ）---
+quality:
+  triangle_min_angle_deg: 25.0
+  triangle_radius_ratio_min: 0.30
+  triangle_aspect_ratio_max: 4.0
+  quadrilateral_aspect_ratio_max: 2.0
+  quadrilateral_min_interior_angle_deg: 20.0
+  quadrilateral_max_interior_angle_deg: 160.0
+  quadrilateral_scaled_jacobian_min: 0.30
+
+# --- 機能フラグ ---
+features:
+  breaklines_as_mesh_edges: true
+  split_surface_by_breaklines: true
+  reference_layers_for_size_field: false
+  reference_layers_in_diagnostics: true
+
+# --- Gmsh ---
+gmsh:
+  algorithm_2d: 6
+  optimize: false
+  optimization_method: Laplace2D
+  verbosity: 0
+  num_threads: 1
+
+# --- 氾濫ブロック並列（斐伊川は 1 ポリゴン。明示 --blocks 時のみ使用）---
+parallel:
+  enabled: false
+  workers: 8
+  min_block_area_m2: 0
+  keep_block_outputs: true
+
+# --- 出力 ---
+output:
+  directory: ../output/hii
+  basename: hii_mesh
+  save_diagnostics: true
+  save_iteration_meshes: false
+  gpkg_csv:
+    directory: ../../Cell/Hii/output_gpkg_csv
+    face_gpkg: face.gpkg
+    edge_gpkg: edge.gpkg
+    face_csv: face.csv
+    edge_csv: edge.csv
+  cell_bin:
+    enabled: true
+    directory: ../../Cell/Hii
+    filename: Hii.bin
+    landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Landuse_100m.tif
+    landuse_epsg: 6668
+    soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/japan_soil.tif
+    soil_epsg: 4326
+    buildings: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/chugoku-latest-free.shp/gis_osm_buildings_a_free_1.shp
