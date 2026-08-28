@@ -1,0 +1,126 @@
+# 鬼怒川（Kinu）— 特殊辺ラインを拘束にしてからメッシュを切る試験
+#
+# 計算範囲と幹線道路（OSM motorway/trunk/primary/secondary）を先に定め、
+# 道路を ROAD 特殊辺として Gmsh に渡す。既定は三角形のみ。
+#
+#   cd tool
+#   nix develop -c python scripts/make_osm_road_breaklines.py \
+#     --config config/kinu.yaml \
+#     --roads /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/kanto-latest-free.shp/gis_osm_roads_free_1.shp \
+#     --out /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kinu/input_gpkg_tif/special_edges.gpkg \
+#     --classes motorway trunk primary --min-length 400 --min-clearance 25
+#   nix develop -c python run.py --config config/kinu.yaml
+#
+# special_edges.gpkg は領域中央を東西に横断する道路＋中央カルバート。
+# OSM 抽出の控えは special_edges_osm_raw.gpkg。
+#
+# 初回は外周 45 m + 幹線 99 km + Frontal (algorithm 6) で Gmsh が 20 分以上
+# 2D 生成から戻らなかった。境界 80 m・幹線のみ・Delaunay (5)・反復 1 回にする。
+
+# --- 入力 ---
+input:
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kinu/input_gpkg_tif/input_gpkg.gpkg
+  domain_min_area: 0
+  polygon_filter: null
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kinu/input_gpkg_tif/dem5m.tif
+  special_edges:
+    file: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kinu/input_gpkg_tif/special_edges.gpkg
+    default_kind: ROAD
+    z_mode: relative
+    match_tol: 2.0
+  breaklines: {}
+  reference_layers: {}
+
+# --- 座標系 ---
+crs:
+  target_epsg: 6677
+
+# --- メッシュ ---
+mesh:
+  min_element_area: 625.0
+  global_min_size: 50.0
+  global_max_size: 150.0
+
+  boundary_quad_band:
+    enabled: false
+    method: transfinite
+    width: 80.0
+    target_size: 80.0
+    layers: 1
+    interface_size: 120.0
+    interface_floor_radius: 40.0
+    min_width_ratio: 0.5
+    corner_angle_deg: 120.0
+
+  interior_quads:
+    enabled: false
+
+  max_iterations: 1
+  max_refine_attempts: 1
+  refinement_factor: 0.85
+  max_neighbor_size_ratio: 2.0
+  size_field_grid: 40.0
+
+# --- 地形適合（5 m DEM）---
+terrain:
+  plane_fit_rmse_max: 0.3
+  slope_direction_spread_max_deg: 60.0
+  representative_elevation_method: area_weighted_mean
+  refine_if_insufficient_dem_samples: false
+  flat_slope_threshold: 0.0005
+  dem_target_px_m: 5.0
+
+# --- 幾何品質 ---
+quality:
+  triangle_min_angle_deg: 25.0
+  triangle_radius_ratio_min: 0.30
+  triangle_aspect_ratio_max: 4.0
+  quadrilateral_aspect_ratio_max: 2.0
+  quadrilateral_min_interior_angle_deg: 20.0
+  quadrilateral_max_interior_angle_deg: 160.0
+  quadrilateral_scaled_jacobian_min: 0.30
+
+# --- 機能フラグ ---
+features:
+  breaklines_as_mesh_edges: true
+  split_surface_by_breaklines: true
+  reference_layers_for_size_field: false
+  reference_layers_in_diagnostics: true
+
+# --- Gmsh ---
+gmsh:
+  algorithm_2d: 5
+  optimize: false
+  optimization_method: Laplace2D
+  verbosity: 0
+  num_threads: 1
+
+# --- 氾濫ブロック並列（Kinu は 1 ポリゴン）---
+parallel:
+  enabled: false
+  workers: 8
+  min_block_area_m2: 0
+  keep_block_outputs: true
+
+# --- 出力 ---
+output:
+  directory: ../../Mesh/Kinu/output_gmsh_tool
+  basename: kinu_mesh
+  save_diagnostics: true
+  save_iteration_meshes: false
+  gpkg_csv:
+    directory: ../../Mesh/Kinu/output_gpkg_csv
+    face_gpkg: face.gpkg
+    edge_gpkg: edge.gpkg
+    face_csv: face.csv
+    edge_csv: edge.csv
+  cell_bin:
+    enabled: true
+    directory: ../../Mesh/Kinu
+    filename: Kinu.bin
+    landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Landuse_100m.tif
+    landuse_epsg: 6668
+    soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/japan_soil.tif
+    soil_epsg: 4326
+    buildings: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/kanto-latest-free.shp/gis_osm_buildings_a_free_1.shp
+    vegetation: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kinu/input_gpkg_tif/vegetation.gpkg

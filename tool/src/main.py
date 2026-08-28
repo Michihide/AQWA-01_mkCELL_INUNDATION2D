@@ -1,6 +1,6 @@
 """パイプライン本体。
 
-  領域読込 -> 修復 -> 外周四角形帯 -> DEM 読込 -> 初期サイズ場
+  領域読込 -> 特殊辺・拘束線読込 -> 修復 -> 外周四角形帯 -> DEM 読込 -> 初期サイズ場
     -> [メッシュ生成 -> 修復 -> 品質・地形評価 -> サイズ場更新] を反復
     -> 出力
 
@@ -24,14 +24,20 @@ from .adaptive_refinement import (
     refine_size_field,
     summarize_unresolvable,
 )
-from .boundary_quad_band import PolygonBand, band_report, build_polygon_band
+from .boundary_quad_band import (
+    PolygonBand,
+    band_report,
+    build_polygon_band,
+    triangle_only_polygon_band,
+)
 from .breaklines import (
     PreparedBreaklines,
     breakline_coverage,
     breaklines_to_geodataframe,
     prepare_breaklines,
 )
-from .cell_bin_export import build_and_write_cell_bin, compute_cell_attributes
+from .cell_bin_export import compute_cell_attributes
+from .mesh_bin_export import build_and_write_mesh_bin
 from .config import Config, load_config
 from .diagnostics import write_diagnostics
 from .exporters import (
@@ -46,12 +52,17 @@ from .exporters import (
 from .geometry_cleaning import clean_polygons
 from .io_raster import DemGrid, load_dem
 from .io_vector import (
-    ConstraintBreaklines,
     ReferenceLayers,
     VectorInputError,
     load_constraint_breaklines,
     load_domain,
     load_reference_layers,
+    merge_constraint_breaklines,
+)
+from .special_edges import (
+    assert_special_edge_clearance,
+    load_special_edge_features,
+    special_features_to_breaklines,
 )
 from .mesh_generator import generate_mesh, gmsh_session
 from .mesh_parser import Mesh, load_mesh_from_msh
@@ -70,9 +81,20 @@ from .utils import get_logger, setup_logging, stage
 
 
 def build_bands(cfg: Config, polys: list[Polygon]) -> list[PolygonBand]:
-    """全ポリゴンの外周四角形帯を作る。"""
+    """全ポリゴンの外周帯を作る。四角形帯が無効なら全域を三角形にする。"""
     logger = get_logger()
     b = cfg.mesh.boundary_quad_band
+    if not b.enabled:
+        spacing = b.target_size if b.target_size > 0.0 else cfg.mesh.global_min_size
+        logger.info(
+            "外周四角形帯は無効。境界を %.1f m 間隔でサンプルし、全域を三角形で埋めます",
+            spacing,
+        )
+        bands = [triangle_only_polygon_band(poly, spacing) for poly in polys]
+        if not bands:
+            raise RuntimeError("解析領域ポリゴンがありません")
+        return bands
+
     bands: list[PolygonBand] = []
     failed: list[tuple[float, str]] = []
 
@@ -166,16 +188,17 @@ def initial_size_field(
         ceiling=cfg.mesh.global_max_size,
         pad=4.0 * cfg.mesh.size_field_grid,
     )
-    iface = b.resolved_interface_size()
-    floor_radius = b.resolved_interface_floor_radius(cfg.mesh.size_field_grid)
-    for band in bands:
-        for ring in band.rings():
-            # 帯から外した区間では Γ0 が内側領域の境界になる。そこも節点間隔が
-            # 固定されている点は Γ1 と同じなので、同じ床を掛ける。
-            pts = ring.interior_ring()
-            if not len(pts):
-                continue
-            sf.raise_floor(pts[:, 0], pts[:, 1], iface, radius=floor_radius)
+    if b.enabled:
+        iface = b.resolved_interface_size()
+        floor_radius = b.resolved_interface_floor_radius(cfg.mesh.size_field_grid)
+        for band in bands:
+            for ring in band.rings():
+                # 帯から外した区間では Γ0 が内側領域の境界になる。そこも節点間隔が
+                # 固定されている点は Γ1 と同じなので、同じ床を掛ける。
+                pts = ring.interior_ring()
+                if not len(pts):
+                    continue
+                sf.raise_floor(pts[:, 0], pts[:, 1], iface, radius=floor_radius)
 
     if breaklines is not None and not breaklines.is_empty():
         floor = cfg.mesh.breakline_processing.resolved_size_floor(
@@ -231,6 +254,16 @@ def run_pipeline(cfg: Config) -> dict:
     domain = MultiPolygon(polys) if len(polys) > 1 else polys[0]
     with stage("線データの読み込み"):
         breaklines = load_constraint_breaklines(cfg, crs, domain)
+        special_feats = load_special_edge_features(cfg, crs, domain)
+        if special_feats:
+            bp = cfg.mesh.breakline_processing
+            spacing = bp.resolved_min_vertex_spacing(cfg.mesh.global_min_size)
+            clearance = bp.resolved_min_clearance(cfg.mesh.min_element_area, spacing)
+            assert_special_edge_clearance(special_feats, clearance)
+            breaklines = merge_constraint_breaklines(
+                breaklines,
+                special_features_to_breaklines(special_feats, crs),
+            )
         references = load_reference_layers(cfg, crs, domain)
 
     with stage("外周四角形帯の構築"):
@@ -423,16 +456,15 @@ def _write_outputs(
     if cfg.output.cell_bin.enabled:
         if terrain is None or dem is None:
             get_logger().warning(
-                "output.cell_bin.enabled=true ですが地形情報が無いため cell.bin を出力できません"
+                "output.cell_bin.enabled=true ですが地形情報が無いため mesh.bin を出力できません"
             )
         else:
-            with stage("cell.bin の出力"):
-                bin_path = build_and_write_cell_bin(
-                    cfg, mesh, quality, terrain, crs, dem, out_dir,
-                    face_gpkg_path, edge_gpkg_path, attrs=cell_attrs,
+            with stage("mesh.bin の出力"):
+                bin_path = build_and_write_mesh_bin(
+                    cfg, mesh, quality, terrain, crs, dem, attrs=cell_attrs,
                 )
                 if bin_path is not None:
-                    summary["cell_bin"] = str(bin_path)
+                    summary["mesh_bin"] = str(bin_path)
 
     return summary
 
@@ -454,7 +486,7 @@ def _node_elevations(mesh: Mesh, terrain: TerrainReport) -> np.ndarray:
 
 
 def export_solver_outputs(cfg: Config, mesh_path: Path | None = None) -> dict:
-    """既存 .msh から face/edge GeoPackage・CSV（および cell.bin）を書き出す。"""
+    """既存 .msh から face/edge GeoPackage・CSV（および mesh.bin）を書き出す。"""
     logger = get_logger()
     out_dir = cfg.output_dir
     base = cfg.output.basename
@@ -496,14 +528,13 @@ def export_solver_outputs(cfg: Config, mesh_path: Path | None = None) -> dict:
     }
 
     if cfg.output.cell_bin.enabled:
-        with stage("cell.bin の出力"):
+        with stage("mesh.bin の出力"):
             attrs = compute_cell_attributes(cfg, mesh, quality, crs)
-            bin_path = build_and_write_cell_bin(
-                cfg, mesh, quality, terrain, crs, dem, out_dir,
-                face_gpkg_path, edge_gpkg_path, attrs=attrs,
+            bin_path = build_and_write_mesh_bin(
+                cfg, mesh, quality, terrain, crs, dem, attrs=attrs,
             )
             if bin_path is not None:
-                summary["cell_bin"] = str(bin_path.resolve())
+                summary["mesh_bin"] = str(bin_path.resolve())
 
     return summary
 

@@ -1,6 +1,6 @@
 """cell.bin に埋め込む土地利用・土壌・建物の面積統計。
 
-01_mkMESH_INUN2DH/01_mkINPUT_Face_Edge.py の "fast" モード（ラスタをポリゴンで
+旧 face/edge 生成の "fast" モード（ラスタをポリゴンで
 クロップし、コード別のピクセル数 × ピクセル面積を積算する方式）に合わせている。
 土地利用・土壌ラスタ（100 m 解像度など）はメッシュ要素より粗いことが多く、
 サブピクセルの厳密な重なり面積までは求めない。ソルバー側は面粗度の重み付けに
@@ -198,3 +198,94 @@ def building_ratio_perimeter(
         perimeter[i] = float(inter.length)
         ratio[i] = min(inter.area / area, ratio_max) if area > 0 else 0.0
     return ratio, perimeter
+
+
+_CD_ALIASES = ("Cd", "C_D", "CD", "cd", "C_d")
+_A_ALIASES = ("a", "a_veg", "A")
+_HV_ALIASES = ("Hv", "H_v", "H", "Hveg", "h_veg")
+
+
+def resolve_attribute_field(
+    columns: list[str],
+    preferred: str,
+    aliases: tuple[str, ...],
+    *,
+    what: str,
+) -> str:
+    """ポリゴン属性列を、指定名または別名から決める。"""
+    exact = {str(c): str(c) for c in columns}
+    lower = {str(c).lower(): str(c) for c in columns}
+    candidates = (preferred, *aliases)
+    for name in candidates:
+        if name in exact:
+            return exact[name]
+        if name.lower() in lower:
+            return lower[name.lower()]
+    raise ValueError(
+        f"植生ポリゴンに {what} 列がありません（探した名前: {list(candidates)}）。"
+        f" ある列: {list(columns)}"
+    )
+
+
+def vegetation_chi_and_params(
+    polygons: list[Polygon],
+    areas: np.ndarray,
+    vegetation: gpd.GeoDataFrame | None,
+    *,
+    ratio_max: float = 0.95,
+    field_cd: str = "Cd",
+    field_a: str = "a",
+    field_hv: str = "Hv",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """各要素の chi_veg と、交差面積で重み付けした C_D, a, H_v を返す。"""
+    n = len(polygons)
+    chi = np.zeros(n, dtype=np.float64)
+    a_out = np.zeros(n, dtype=np.float64)
+    hv_out = np.zeros(n, dtype=np.float64)
+    cd_out = np.zeros(n, dtype=np.float64)
+    if vegetation is None or vegetation.empty:
+        return chi, a_out, hv_out, cd_out
+
+    live = vegetation[vegetation.geometry.notna() & ~vegetation.geometry.is_empty]
+    if live.empty:
+        return chi, a_out, hv_out, cd_out
+
+    col_cd = resolve_attribute_field(list(live.columns), field_cd, _CD_ALIASES, what="C_D")
+    col_a = resolve_attribute_field(list(live.columns), field_a, _A_ALIASES, what="a")
+    col_hv = resolve_attribute_field(list(live.columns), field_hv, _HV_ALIASES, what="H_v")
+
+    geoms = list(live.geometry)
+    cds = np.asarray(live[col_cd], dtype=np.float64)
+    avs = np.asarray(live[col_a], dtype=np.float64)
+    hvs = np.asarray(live[col_hv], dtype=np.float64)
+    tree = STRtree(geoms)
+
+    for i, poly in enumerate(polygons):
+        idx = tree.query(poly, predicate="intersects")
+        if len(idx) == 0:
+            continue
+        inter_area = 0.0
+        w_cd = 0.0
+        w_a = 0.0
+        w_hv = 0.0
+        for j in idx:
+            inter = poly.intersection(geoms[j])
+            if inter.is_empty:
+                continue
+            ia = float(inter.area)
+            if ia <= 0.0:
+                continue
+            inter_area += ia
+            if np.isfinite(cds[j]):
+                w_cd += float(cds[j]) * ia
+            if np.isfinite(avs[j]):
+                w_a += float(avs[j]) * ia
+            if np.isfinite(hvs[j]):
+                w_hv += float(hvs[j]) * ia
+        face_area = float(areas[i])
+        chi[i] = min(inter_area / face_area, ratio_max) if face_area > 0.0 else 0.0
+        if inter_area > 0.0:
+            cd_out[i] = w_cd / inter_area
+            a_out[i] = w_a / inter_area
+            hv_out[i] = w_hv / inter_area
+    return chi, a_out, hv_out, cd_out

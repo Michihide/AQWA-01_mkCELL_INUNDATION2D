@@ -2,10 +2,10 @@
 # 球磨川の DEM は 5 m で線状構造物を判別できなかった。
 
 input:
-  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/input_gpkg.gpkg
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/input_gpkg.gpkg
   domain_min_area: 1000.0
   polygon_filter: null
-  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/DEM1M.tif
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/DEM1M.tif
 
   # 内部の道路・盛り土。1 m DEM から scripts/detect_embankments.py で検出したもので、
   # 形状は DEM 由来である（OSM は種別の注記にしか使っていない）。
@@ -26,7 +26,7 @@ mesh:
   global_max_size: 150.0
 
   boundary_quad_band:
-    enabled: true
+    enabled: false
     method: transfinite
     # 境界は堤防を再現する重要度が高いため、帯四角形は面積下限と同じ
     # サイズ（10 x 10 = 100 m^2）にする。堤防の再現性を優先し、境界に

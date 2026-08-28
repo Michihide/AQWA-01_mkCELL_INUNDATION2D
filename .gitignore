@@ -1,12 +1,7 @@
 # メッシュ生成物・大容量データ
-Cell/
+Mesh/
 mesh_bundle/
 *.zip
-
-# 旧パイプライン退避先の生成物
-legacy/_regression_snapshots/
-legacy/mesh_generator/output_*/
-legacy/mesh_generator/testdata/output_mesh/
 
 # 大容量入力データ（ローカル配置）
 OpenStreetMap/
@@ -23,8 +18,6 @@ tool/output/
 **/block_logs/
 
 # ビルド・キャッシュ
-legacy/native/*.o
-legacy/native/*.dylib
 __pycache__/
 *.pyc
 .pytest_cache/

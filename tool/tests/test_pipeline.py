@@ -6,16 +6,15 @@ import textwrap
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString, MultiLineString, Point
+from shapely.geometry import LineString, Point
 
 from scripts.make_synthetic_data import RIDGE_Y
-from src.boundary_quad_band import build_polygon_band
 from src.config import load_config
 from src.geometry_cleaning import clean_polygons
-from src.gmsh_geometry import PG_DOMAIN_BOUNDARY, PG_QUAD_BOUNDARY, PG_TRI_INTERIOR
+from src.gmsh_geometry import PG_DOMAIN_BOUNDARY, PG_TRI_INTERIOR
 from src.io_raster import load_dem
 from src.io_vector import load_domain
-from src.main import initial_size_field, run_pipeline
+from src.main import build_bands, initial_size_field, run_pipeline
 from src.mesh_generator import generate_mesh, gmsh_session
 from src.mesh_repair import repair_mesh
 from src.quality_metrics import evaluate_quality
@@ -51,12 +50,7 @@ def rect_setup(tmp_path, synthetic_data):
     polys, crs = load_domain(cfg)
     polys = clean_polygons(polys, cfg.input.domain_min_area,
                            narrow_feature_radius=cfg.mesh.resolved_narrow_feature_radius())
-    b = cfg.mesh.boundary_quad_band
-    bands = [
-        build_polygon_band(p, b.width, b.target_size,
-                           min_element_area=cfg.mesh.min_element_area)
-        for p in polys
-    ]
+    bands = build_bands(cfg, polys)
     return cfg, crs, polys, bands
 
 
@@ -77,35 +71,19 @@ def test_initial_size_field_stays_coarse_away_from_boundary(rect_setup):
     )
 
 
-def test_the_boundary_is_mostly_quads(rect_setup):
-    """境界は四角形が原則。置けない区間だけ三角形に譲る。"""
-    cfg, _, polys, bands = rect_setup
+def test_the_mesh_is_triangles_only(rect_setup):
+    """既定では外周四角形帯を置かず、要素は三角形だけ。"""
+    cfg, _, _, bands = rect_setup
+    assert cfg.mesh.boundary_quad_band.enabled is False
+    assert all(b.quad_count() == 0 for b in bands)
     sf = initial_size_field(cfg, bands)
     with gmsh_session(cfg):
         mesh, tags, groups = generate_mesh(cfg, bands, sf)
-        assert PG_QUAD_BOUNDARY in groups
         assert PG_TRI_INTERIOR in groups
         assert PG_DOMAIN_BOUNDARY in groups
-        band_surfaces = set(tags.band_surfaces)
-
-    ring = bands[0].exterior
-    tri_segments = set(ring.skipped) | set(ring.closing_indices())
-    assert len(tri_segments) / ring.n < 0.2  # 譲るのは一部だけ
-
-    boundary = polys[0].exterior
-    on_boundary = np.array([
-        boundary.distance(Point(*p)) < 1e-6 for p in mesh.nodes
-    ])
-    # 境界に接する三角形は、四角形を置けなかった区間の上にしかない
-    tri_edges = MultiLineString([
-        [ring.outer[i], ring.outer[(i + 1) % ring.n]] for i in tri_segments
-    ])
-    for tri in mesh.triangles:
-        touching = mesh.nodes[tri][on_boundary[tri]]
-        for p in touching:
-            assert tri_edges.distance(Point(*p)) < 1e-6
-
-    assert set(mesh.quad_surface.tolist()) <= band_surfaces
+        assert not tags.band_surfaces
+    assert len(mesh.quads) == 0
+    assert len(mesh.triangles) > 0
 
 
 def test_the_boundary_shape_is_not_altered(rect_setup):
@@ -175,5 +153,5 @@ def test_pipeline_writes_expected_outputs(tmp_path, synthetic_data):
                  "test_mesh_elements.csv", "test_mesh_nodes.csv", "summary.json"):
         assert (out / name).exists(), name
     assert summary["viol_area_below_min"] == 0
-    assert summary["n_quads"] > 0
+    assert summary["n_quads"] == 0
     assert summary["n_triangles"] > 0

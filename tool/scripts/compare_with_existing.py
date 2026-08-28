@@ -27,7 +27,7 @@ from src.terrain_metrics import (  # noqa: E402
     terrain_violations,
 )
 
-EXISTING = Path("/Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell")
+EXISTING = Path("/Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh")
 
 
 def polygons_from_gpkg(path: Path, crs: str) -> np.ndarray:

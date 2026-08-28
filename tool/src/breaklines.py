@@ -29,6 +29,8 @@ from .config import Config
 from .io_vector import ConstraintBreaklines
 from .utils import get_logger
 
+SPECIAL_LAYER = "special_edges"
+
 
 @dataclass
 class PreparedLine:
@@ -37,6 +39,8 @@ class PreparedLine:
     coords: np.ndarray  # (n, 2)、n >= 2
     layer: str
     band_index: int
+    # True なら近接・短尺を理由に落とさない（特殊辺）。
+    strict: bool = False
 
     @property
     def length(self) -> float:
@@ -198,6 +202,9 @@ def drop_crowded_segments(
     kept: list[PreparedLine] = []
     dropped = 0.0
     for i, (line, prepared) in enumerate(zip(geoms, lines)):
+        if prepared.strict:
+            kept.append(prepared)
+            continue
         stations = np.arange(0.0, line.length + station_step, station_step)
         pts = shapely.points(
             np.array([line.interpolate(float(s)).coords[0] for s in stations])
@@ -239,6 +246,7 @@ def drop_crowded_segments(
                         coords=np.asarray(ls.coords, dtype=float),
                         layer=prepared.layer,
                         band_index=prepared.band_index,
+                        strict=prepared.strict,
                     )
                 )
         dropped += line.length - sum(e - s for s, e in _keep_intervals(line.length, runs))
@@ -276,6 +284,9 @@ def trim_close_endpoints(
     out: list[PreparedLine] = []
     trimmed = 0.0
     for i, (line, prepared) in enumerate(zip(geoms, lines)):
+        if prepared.strict:
+            out.append(prepared)
+            continue
         cuts = []
         for at_start in (True, False):
             anchor = shapely.Point(line.coords[0 if at_start else -1])
@@ -299,6 +310,7 @@ def trim_close_endpoints(
                     coords=np.asarray(ls.coords, dtype=float),
                     layer=prepared.layer,
                     band_index=prepared.band_index,
+                    strict=prepared.strict,
                 )
             )
 
@@ -319,8 +331,10 @@ def _tidy(
         coords = _resample(_dedupe(ln.coords), min_spacing)
         if len(coords) < 2:
             continue
-        line = PreparedLine(coords=coords, layer=ln.layer, band_index=ln.band_index)
-        if line.length >= min_length:
+        line = PreparedLine(
+            coords=coords, layer=ln.layer, band_index=ln.band_index, strict=ln.strict,
+        )
+        if ln.strict or line.length >= min_length:
             out.append(line)
     return out
 
@@ -349,8 +363,13 @@ def prepare_breaklines(
     """拘束ブレークラインを gmsh へ渡せる形に整える。"""
     logger = get_logger()
     out = PreparedBreaklines()
-    if breaklines.is_empty() or not cfg.features.breaklines_as_mesh_edges:
+    if breaklines.is_empty():
         return out
+    if not cfg.features.breaklines_as_mesh_edges:
+        special_gdf = breaklines.layers.get(SPECIAL_LAYER)
+        if special_gdf is None or special_gdf.empty:
+            return out
+        breaklines = ConstraintBreaklines(layers={SPECIAL_LAYER: special_gdf})
 
     bp = cfg.mesh.breakline_processing
     min_spacing = bp.resolved_min_vertex_spacing(cfg.mesh.global_min_size)
@@ -389,7 +408,13 @@ def prepare_breaklines(
             continue
 
         for line in merged:
-            clipped = shapely.intersection(line, region)
+            mid = line.interpolate(0.5, normalized=True)
+            layer = origin_layer[int(tree.nearest(mid))]
+            strict = layer == SPECIAL_LAYER
+            clip_region = band.interior if strict else region
+            if clip_region is None or clip_region.is_empty:
+                continue
+            clipped = shapely.intersection(line, clip_region)
             for piece in _as_linestrings(clipped):
                 out.clipped_length += piece.length
                 coords = _dedupe(np.asarray(piece.coords, dtype=float))
@@ -404,15 +429,16 @@ def prepare_breaklines(
                 )
                 if len(coords) < 2:
                     continue
-                if float(np.linalg.norm(np.diff(coords, axis=0), axis=1).sum()) < min_length:
+                length = float(np.linalg.norm(np.diff(coords, axis=0), axis=1).sum())
+                if not strict and length < min_length:
                     continue
 
-                nearest = tree.nearest(shapely.points(coords[len(coords) // 2]))
                 out.lines.append(
                     PreparedLine(
                         coords=coords,
-                        layer=origin_layer[int(nearest)],
+                        layer=layer,
                         band_index=band_index,
+                        strict=strict,
                     )
                 )
 
@@ -426,15 +452,16 @@ def prepare_breaklines(
 
     out.close_vertex_pairs = _count_close_vertex_pairs(out.lines, min_spacing)
 
+    special_km = sum(ln.length for ln in out.lines if ln.strict) / 1000.0
     logger.info(
-        "拘束ブレークライン: %d 本 / 総延長 %.2f km（入力 %.2f km、領域内 %.2f km）",
+        "拘束線: %d 本 / 総延長 %.2f km（入力 %.2f km、領域内 %.2f km、うち特殊辺 %.2f km）",
         len(out.lines), out.output_length / 1000.0,
-        out.input_length / 1000.0, out.clipped_length / 1000.0,
+        out.input_length / 1000.0, out.clipped_length / 1000.0, special_km,
     )
     if out.crowded_length > 0.0:
         logger.warning(
-            "近接のため %.2f km の拘束を見送りました（間隔 %.0f m 未満）。"
-            "面積下限 %.0f m^2 を優先しています",
+            "近接のためブレークライン %.2f km の拘束を見送りました（間隔 %.0f m 未満）。"
+            "面積下限 %.0f m^2 を優先。特殊辺は見送りません",
             out.crowded_length / 1000.0, clearance, cfg.mesh.min_element_area,
         )
     if out.close_vertex_pairs:

@@ -1,8 +1,8 @@
 """AQWA-INUNDATION2D の cell.bin（Fortran stream unformatted）出力。
 
 02_Solver/compile/src/inun2dh/inun2dh_io.f90 がそのまま読み込めるバイナリを
-書き出す。フォーマットは 01_mkMESH_INUN2DH/02_mkCELL.py の write_cell_bin() と
-完全互換（リトルエンディアン）。
+書き出す。旧 cell.bin（Fortran stream unformatted）と同じ並び
+（リトルエンディアン）。
 
   ヘッダー: face_gpkg_path(1000B), edge_gpkg_path(1000B),
             total_face(i4), total_edge(i4), total_face_index(i4)
@@ -45,6 +45,7 @@ from .zonal_stats import (
     building_ratio_perimeter,
     load_buildings_bbox,
     raster_code_areas,
+    vegetation_chi_and_params,
 )
 
 LANDUSE_CODES = ["10", "20", "50", "60", "70", "91", "92", "100", "110", "140", "150", "160", "255"]
@@ -62,6 +63,10 @@ class CellAttributes:
     soil_areas: np.ndarray
     bld_ratio: np.ndarray
     bld_peri: np.ndarray
+    chi_veg: np.ndarray
+    a_veg: np.ndarray
+    H_veg: np.ndarray
+    Cd_veg: np.ndarray
 
 
 def compute_cell_attributes(
@@ -70,7 +75,7 @@ def compute_cell_attributes(
     quality: QualityReport,
     crs: CRS,
 ) -> CellAttributes:
-    """cell.bin / face.gpkg 共通の土地利用・土壌・建物属性を求める。"""
+    """mesh.bin / face.gpkg 共通の土地利用・土壌・建物・植生属性を求める。"""
     logger = get_logger()
     cb = cfg.output.cell_bin
     polygons = [Polygon(coords) for coords in mesh.element_polygons()]
@@ -111,7 +116,31 @@ def compute_cell_attributes(
         bld_ratio = np.zeros(n)
         bld_peri = np.zeros(n)
 
-    return CellAttributes(landuse_areas, soil_areas, bld_ratio, bld_peri)
+    if cb.vegetation:
+        path = cfg.resolve(cb.vegetation)
+        mins = mesh.nodes.min(axis=0)
+        maxs = mesh.nodes.max(axis=0)
+        bounds = (float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1]))
+        logger.info("植生ポリゴンを読み込み中: %s", path)
+        vegetation = load_buildings_bbox(path, crs, bounds)
+        chi_veg, a_veg, H_veg, Cd_veg = vegetation_chi_and_params(
+            polygons, quality.area, vegetation,
+            ratio_max=cb.vegetation_ratio_max,
+            field_cd=cb.veg_field_cd,
+            field_a=cb.veg_field_a,
+            field_hv=cb.veg_field_hv,
+        )
+    else:
+        logger.warning("output.cell_bin.vegetation が未指定のため植生抵抗を 0 で埋めます")
+        chi_veg = np.zeros(n)
+        a_veg = np.zeros(n)
+        H_veg = np.zeros(n)
+        Cd_veg = np.zeros(n)
+
+    return CellAttributes(
+        landuse_areas, soil_areas, bld_ratio, bld_peri,
+        chi_veg, a_veg, H_veg, Cd_veg,
+    )
 
 
 def _pad_path(path_str: str, length: int = _PATH_FIELD_LEN) -> bytes:

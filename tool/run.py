@@ -28,7 +28,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--export-only",
         action="store_true",
-        help="既存 .msh から face.gpkg / edge.gpkg / cell.bin のみ出力する",
+        help="既存 .msh から face.gpkg / edge.gpkg / mesh.bin のみ出力する",
     )
     parser.add_argument(
         "--mesh",
@@ -62,8 +62,8 @@ def _print_summary(summary: dict, cfg=None) -> None:
     if "face_gpkg" in summary:
         print(f"face.gpkg     : {summary['face_gpkg']}")
         print(f"edge.gpkg     : {summary['edge_gpkg']}")
-        if "cell_bin" in summary:
-            print(f"cell.bin      : {summary['cell_bin']}")
+        if "mesh_bin" in summary:
+            print(f"mesh.bin      : {summary['mesh_bin']}")
         if "n_blocks" in summary:
             print(f"ブロック数    : {summary['n_blocks']} (workers={summary.get('workers')})")
     elif "n_elements" not in summary or cfg is None:

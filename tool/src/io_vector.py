@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import geopandas as gpd
+import pandas as pd
 from pyproj import CRS
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -163,6 +164,22 @@ def _load_lines(path: Path, target: CRS, clip_to: BaseGeometry | None) -> gpd.Ge
         gdf = gpd.clip(gdf, clip_to)
         gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
     return gdf.reset_index(drop=True)
+
+
+def merge_constraint_breaklines(
+    *parts: ConstraintBreaklines,
+) -> ConstraintBreaklines:
+    """同じレイヤ名の行を連結して一つの拘束集合にする。"""
+    layers: dict[str, gpd.GeoDataFrame] = {}
+    for part in parts:
+        for name, gdf in part.layers.items():
+            if gdf is None or gdf.empty:
+                continue
+            if name in layers:
+                layers[name] = pd.concat([layers[name], gdf], ignore_index=True)
+            else:
+                layers[name] = gdf.copy()
+    return ConstraintBreaklines(layers=layers)
 
 
 def load_constraint_breaklines(

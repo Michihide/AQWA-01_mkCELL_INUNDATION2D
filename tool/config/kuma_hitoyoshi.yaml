@@ -12,10 +12,10 @@
 
 # --- 入力 ---
 input:
-  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
   domain_min_area: 0
   polygon_filter: null
-  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
   breaklines:
     embankments: ../data/kuma_embankments.gpkg
 
@@ -30,7 +30,7 @@ mesh:
   global_max_size: 150.0      # 平坦部の目標辺長上限 [m]
 
   boundary_quad_band:
-    enabled: true
+    enabled: false
     method: transfinite
     width: 25.0               # 法線方向 [m]。target_size と揃えて正方形化
     target_size: 25.0         # 接線方向 [m]（width と同一が理想）
@@ -94,17 +94,17 @@ output:
   save_diagnostics: true
   save_iteration_meshes: false   # 反復ごとの vtu 保存オフ（時間・容量節約）
   gpkg_csv:
-    directory: ../../Cell/Kuma_Hitoyoshi/output_gpkg_csv
+    directory: ../../Mesh/Kuma_Hitoyoshi/output_gpkg_csv
     face_gpkg: face.gpkg
     edge_gpkg: edge.gpkg
     face_csv: face.csv
     edge_csv: edge.csv
   cell_bin:
     enabled: true
-    directory: ../../Cell/Kuma_Hitoyoshi
+    directory: ../../Mesh/Kuma_Hitoyoshi
     filename: Kuma_Hitoyoshi.bin
-    landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/Landuse_100m.tif
+    landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/Landuse_100m.tif
     landuse_epsg: 6668
-    soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/japan_soil.tif
+    soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/japan_soil.tif
     soil_epsg: 4326
     buildings: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/kyushu-latest-free.shp/gis_osm_buildings_a_free_1.shp

@@ -18,6 +18,10 @@ def _attrs(n: int = 2) -> CellAttributes:
         soil_areas=np.zeros((n, 17)),
         bld_ratio=np.zeros(n),
         bld_peri=np.zeros(n),
+        chi_veg=np.zeros(n),
+        a_veg=np.zeros(n),
+        H_veg=np.zeros(n),
+        Cd_veg=np.zeros(n),
     )
 
 

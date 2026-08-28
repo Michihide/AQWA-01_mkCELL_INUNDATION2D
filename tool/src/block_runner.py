@@ -1,4 +1,4 @@
-"""氾濫ブロック単位の並列実行と統合後の cell.bin 出力。"""
+"""氾濫ブロック単位の並列実行と統合後の mesh.bin 出力。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pyproj import CRS
 
 from .block_helpers import block_mesh_path, config_for_block, list_block_indices
 from .block_merge import merge_block_outputs
-from .cell_bin_export import build_and_write_cell_bin
+from .mesh_bin_export import build_and_write_mesh_bin
 from .config import Config, load_config
 from .io_raster import load_dem
 from .main import run_pipeline
@@ -87,20 +87,16 @@ def finalize_merged_quality(cfg: Config, block_indices: list[int]) -> dict:
 def finalize_merged_cell_bin(
     cfg: Config, block_indices: list[int],
 ) -> tuple[Path | None, dict]:
-    """統合 face/edge パスを参照する cell.bin を書き出し、品質サマリーを返す。"""
-    with stage("統合メッシュから cell.bin を出力"):
+    """統合メッシュから mesh.bin を書き出し、品質サマリーを返す。"""
+    with stage("統合メッシュから mesh.bin を出力"):
         quality_summary, mesh, quality, terrain, dem, crs = finalize_merged_quality(
             cfg, block_indices,
         )
         if not cfg.output.cell_bin.enabled:
             return None, quality_summary
 
-        gc = cfg.output.gpkg_csv
-        face_path = cfg.gpkg_csv_dir / gc.face_gpkg
-        edge_path = cfg.gpkg_csv_dir / gc.edge_gpkg
-        bin_path = build_and_write_cell_bin(
-            cfg, mesh, quality, terrain, crs, dem, cfg.output_dir,
-            face_path, edge_path,
+        bin_path = build_and_write_mesh_bin(
+            cfg, mesh, quality, terrain, crs, dem,
         )
         return bin_path, quality_summary
 
@@ -112,7 +108,7 @@ def run_blocks_parallel(
     workers: int | None = None,
     block_indices: list[int] | None = None,
 ) -> dict:
-    """全ブロックを並列生成し、face/edge と cell.bin を統合出力する。"""
+    """全ブロックを並列生成し、face/edge と mesh.bin を統合出力する。"""
     logger = get_logger()
     indices = block_indices if block_indices is not None else list_block_indices(cfg)
     if not indices:
@@ -195,5 +191,5 @@ def run_blocks_parallel(
         **quality_summary,
     }
     if bin_path is not None:
-        summary["cell_bin"] = str(bin_path.resolve())
+        summary["mesh_bin"] = str(bin_path.resolve())
     return summary

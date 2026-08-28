@@ -54,6 +54,35 @@ class ReferenceLayerInputs:
 
 
 @dataclass
+class SpecialEdgeInputs:
+    """ソルバー特殊辺の入力ライン。計算範囲と同時に定め、厳密なメッシュ拘束にする。
+
+    1 ファイルに ROAD / CULVERT / Q などを混ぜ、各地物の kind 列で区別する。
+    kind 列が無い線は default_kind を使う。幾何だけの拘束は breaklines のまま。
+    """
+
+    file: str | None = None
+    default_kind: str = "ROAD"
+    # 生成後の辺対応付け許容距離 [m]。0 なら global_min_size の 5%（下限 1 m）。
+    match_tol: float = 0.0
+    field_kind: str = "kind"
+    field_zc: str = "zc"
+    field_H: str = "H"
+    field_z_road: str = "z_road"
+    field_B: str = "B"
+    field_cover: str = "cover"
+    field_qgroup: str = "qgroup"
+    field_z_mode: str = "z_mode"
+    # zc / z_road の意味。absolute=標高、relative=地盤（z_crest）からの高さ。
+    z_mode: str = "absolute"
+
+    def resolved_match_tol(self, global_min_size: float) -> float:
+        if self.match_tol > 0.0:
+            return self.match_tol
+        return max(1.0, 0.05 * global_min_size)
+
+
+@dataclass
 class InputConfig:
     domain: str = ""
     domain_layer: str | None = None
@@ -63,6 +92,7 @@ class InputConfig:
     polygon_filter: list[int] | None = None
     dem: str = ""
     breaklines: BreaklineInputs = field(default_factory=BreaklineInputs)
+    special_edges: SpecialEdgeInputs = field(default_factory=SpecialEdgeInputs)
     reference_layers: ReferenceLayerInputs = field(default_factory=ReferenceLayerInputs)
 
 
@@ -74,7 +104,7 @@ class CrsConfig:
 
 @dataclass
 class BoundaryQuadBandConfig:
-    enabled: bool = True
+    enabled: bool = False
     method: str = "transfinite"  # transfinite | boundary_layer
     width: float = 30.0
     target_size: float = 50.0  # 帯の接線方向の節点間隔
@@ -286,7 +316,11 @@ class GmshConfig:
 
 @dataclass
 class CellBinConfig:
-    """AQWA-INUNDATION2D ソルバーが読み込む cell.bin の出力設定。"""
+    """AQWA-INUNDATION2D ソルバーが読み込む mesh.bin の出力設定。
+
+    enabled のとき作業ファイルと pack 済み mesh.bin を書く。
+    filename の既定は mesh.bin。旧 cell.bin は scripts/cell_bin_to_mesh.py 用。
+    """
 
     enabled: bool = False
     directory: str | None = None
@@ -297,6 +331,12 @@ class CellBinConfig:
     soil_epsg: int | None = None
     buildings: str | None = None
     building_ratio_max: float = 0.95
+    # 樹木・植生ポリゴン。交差で chi_veg を求め、属性 Cd / a / Hv を面へ載せる。
+    vegetation: str | None = None
+    vegetation_ratio_max: float = 0.95
+    veg_field_cd: str = "Cd"
+    veg_field_a: str = "a"
+    veg_field_hv: str = "Hv"
 
 
 @dataclass
@@ -530,6 +570,48 @@ def _validate(cfg: Config) -> None:
     cb = cfg.output.cell_bin
     if not 0.0 < cb.building_ratio_max <= 1.0:
         raise ConfigError("output.cell_bin.building_ratio_max は 0 < r <= 1 です")
+    if not 0.0 < cb.vegetation_ratio_max <= 1.0:
+        raise ConfigError("output.cell_bin.vegetation_ratio_max は 0 < r <= 1 です")
+    for name, val in (
+        ("veg_field_cd", cb.veg_field_cd),
+        ("veg_field_a", cb.veg_field_a),
+        ("veg_field_hv", cb.veg_field_hv),
+    ):
+        if not str(val).strip():
+            raise ConfigError(f"output.cell_bin.{name} は空にできません")
+
+    from .mesh_bin_io import parse_z_mode, resolve_kind_name
+
+    se = cfg.input.special_edges
+    if se.match_tol < 0.0:
+        raise ConfigError("input.special_edges.match_tol は 0 以上です")
+    try:
+        se.default_kind = resolve_kind_name(se.default_kind)
+    except ValueError as exc:
+        raise ConfigError(
+            f"input.special_edges.default_kind='{se.default_kind}' は "
+            "ROAD / CULVERT / Q / W / WALL のどれかです"
+        ) from exc
+    if se.default_kind == "NONE":
+        raise ConfigError("input.special_edges.default_kind に NONE は使えません")
+    try:
+        se.z_mode = parse_z_mode(se.z_mode)
+    except ValueError as exc:
+        raise ConfigError(
+            f"input.special_edges.z_mode='{se.z_mode}' は absolute / relative です"
+        ) from exc
+    for name, val in (
+        ("field_kind", se.field_kind),
+        ("field_zc", se.field_zc),
+        ("field_H", se.field_H),
+        ("field_z_road", se.field_z_road),
+        ("field_B", se.field_B),
+        ("field_cover", se.field_cover),
+        ("field_qgroup", se.field_qgroup),
+        ("field_z_mode", se.field_z_mode),
+    ):
+        if not str(val).strip():
+            raise ConfigError(f"input.special_edges.{name} は空にできません")
 
 
 def load_config(path: str | Path) -> Config:

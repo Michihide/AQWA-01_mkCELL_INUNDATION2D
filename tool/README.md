@@ -1,9 +1,9 @@
 # 地形適合型ハイブリッド非構造格子生成ツール
 
 DEM・解析領域ポリゴン・拘束ブレークライン（堤防・道路など）から、氾濫解析（2D
-浸水想定）向けのハイブリッド非構造格子（外周は四角形、内部は三角形主体）を
-自動生成する。Gmsh の Python API を用い、生成 → 検査 → 局所細分化 → 修復を
-収束するまで反復する。
+浸水想定）向けの非構造格子を自動生成する。既定は三角形のみ。外周四角形帯は
+`mesh.boundary_quad_band.enabled: true` のときだけ付ける。Gmsh の Python API を
+用い、生成 → 検査 → 局所細分化 → 修復を収束するまで反復する。
 
 ## 実行方法
 
@@ -23,8 +23,8 @@ python run.py --config config/kuma_hitoyoshi.yaml
 python run.py --config config/hii.yaml
 
 # データセット設定（各データセットの yaml/ から実行）
-python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config.yaml
-python run.py --config ../Cell/Hii/yaml/mesh_config.yaml
+python run.py --config ../Mesh/Kuma_Hitoyoshi/yaml/mesh_config.yaml
+python run.py --config ../Mesh/Hii/yaml/mesh_config.yaml
 ```
 
 ### 氾濫ブロック並列（Kuma 等）
@@ -35,13 +35,13 @@ face/edge/cell.bin をマージする。YAML の `parallel.enabled: true` でも
 
 ```bash
 # 全域（30 ブロック、8 並列）
-python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config.yaml --blocks --workers 8
+python run.py --config ../Mesh/Kuma_Hitoyoshi/yaml/mesh_config.yaml --blocks --workers 8
 
 # 地形緩和版（セル数削減。現在ソルバー投入済み — Kuma_Hitoyoshi/MESH_ACTIVE.md 参照）
-python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config_relaxed_terrain.yaml --blocks --workers 8
+python run.py --config ../Mesh/Kuma_Hitoyoshi/yaml/mesh_config_relaxed_terrain.yaml --blocks --workers 8
 
 # 単ブロック試験（設定変更の短時間確認）
-python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config_relaxed_boundary_test.yaml \
+python run.py --config ../Mesh/Kuma_Hitoyoshi/yaml/mesh_config_relaxed_boundary_test.yaml \
   --blocks --block-indices 0 --workers 1
 ```
 
@@ -49,8 +49,8 @@ python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config_relaxed_boundary_
 
 ```bash
 python run.py --config config/hii.yaml --export-only
-python run.py --config ../Cell/Kuma_Hitoyoshi/yaml/mesh_config.yaml --export-only \
-  --mesh ../Cell/Kuma_Hitoyoshi/output_gmsh_tool/kuma_mesh.msh
+python run.py --config ../Mesh/Kuma_Hitoyoshi/yaml/mesh_config.yaml --export-only \
+  --mesh ../Mesh/Kuma_Hitoyoshi/output_gmsh_tool/kuma_mesh.msh
 ```
 
 ### 補助スクリプト
@@ -87,6 +87,9 @@ nix を使わない場合は `requirements.txt` を任意の Python 3.11+ 環境
 - [ディレクトリ構成（tool/）](#ディレクトリ構成tool)
 - [出力](#出力)
 - [既知の制限](#既知の制限)
+
+特殊辺ラインの入力と手順は [docs/README.md](../docs/README.md)。
+mesh.bin のバイト列は [docs/mesh_bin_spec.md](../docs/mesh_bin_spec.md)。
 
 ## リポジトリ構成
 
@@ -135,7 +138,8 @@ gmsh/
 | キー | 役割 |
 | --- | --- |
 | `input.domain` / `input.dem` | 解析領域・DEM のパス |
-| `input.breaklines.*` | 拘束ブレークライン（メッシュ辺に一致させる線） |
+| `input.special_edges.file` | 特殊辺ライン 1 本（kind 列で区別。厳密なメッシュ拘束） |
+| `input.breaklines.*` | 幾何だけの拘束ブレークライン（堤防天端など） |
 | `input.reference_layers.*` | 参照レイヤ（OSM 等、診断・サイズ場の目安） |
 | `crs.target_epsg` | メートル単位の投影座標系（Web Mercator 等は禁止） |
 | `mesh.min_element_area` | 面積下限 [m²]。設計思想の起点 |
@@ -157,6 +161,9 @@ gmsh/
 input:
   domain: ../input_gpkg_tif/input_gpkg.gpkg
   dem: ../input_gpkg_tif/DEM1M.tif
+  special_edges:
+    file: ../input_gpkg_tif/special_edges.gpkg
+    default_kind: ROAD
   breaklines:
     embankments: ../../tool/data/hii_embankments.gpkg
 
@@ -177,13 +184,13 @@ output:
 
 ```
 解析領域の読込・修復
-  -> 拘束ブレークライン / 参照レイヤの読込
+  -> 特殊辺ライン / 拘束ブレークライン / 参照レイヤの読込
   -> 外周四角形帯の構築（Γ1 を決める）
-  -> 拘束ブレークラインの前処理（間引き・ノーディング・帯との干渉回避）
+  -> 拘束線の前処理（間引き・ノーディング・帯との干渉回避）
   -> DEM の読込
   -> 初期サイズ場の構築
   -> [ Gmsh でメッシュ生成 -> 修復 -> 品質・地形評価 -> サイズ場更新 ] を反復
-  -> 成果物の出力（msh/VTU/XDMF/GeoPackage/CSV/cell.bin/診断図）
+  -> 成果物の出力（msh/VTU/XDMF/GeoPackage/CSV/mesh.bin/診断図）
 ```
 
 `--blocks` 指定時は、上記を氾濫ブロックごとに実行し、`block_merge.py` で
@@ -214,10 +221,14 @@ face/edge/cell.bin を統合する。
 には、この例外は適用されない**（面積下限が優先され、下限を守れない区間は
 拘束を諦める。「問題解決」参照）。
 
-### 2. 境界形状の再現性（外周四角形帯）
+### 2. 境界形状の再現性（既定は三角形のみ）
 
-外周には 1 層の四角形帯（`boundary_quad_band.py`）を Transfinite で敷き、
-内向きオフセットで作った内側境界（Γ1）とを対にして各区間を四角形にする。
+既定では外周四角形帯は無効（`mesh.boundary_quad_band.enabled: false`）で、
+領域全体を三角形で埋める。境界は `target_size`（未指定なら `global_min_size`）
+間隔でサンプルする。四角形帯を使うときだけ `enabled: true` にする。
+
+有効にすると外周に 1 層の四角形帯（`boundary_quad_band.py`）を Transfinite で
+敷き、内向きオフセットで作った内側境界（Γ1）とを対にして各区間を四角形にする。
 
 - 帯の幅・接線方向サイズ（`width` / `target_size`）は、面積下限に対応する
   正方形サイズ（`sqrt(min_element_area)`）に合わせるのが既定の考え方。
@@ -258,10 +269,33 @@ face/edge/cell.bin を統合する。
 代表辺長比の上限を課している。実要素側の保証はこのキーの役割で、違反する
 粗い三角形は最長辺二分割で修復する。
 
-### 6. 拘束ブレークライン（堤防・道路など）
+### 6. 特殊辺ラインと拘束ブレークライン
 
-`breaklines.py` が担う。測量線をそのまま Gmsh に渡すと破綻するため、
-間引き・ノーディング・外周帯との干渉回避を行ってから渡す。
+手順は **計算範囲と特殊辺ラインを先に定め、そこからメッシュを生成する**。
+特殊辺はソルバーの `kind`（`ROAD` / `CULVERT` / `Q` / `W` / `WALL`）を
+持つ線で、Gmsh の拘束条件になる。生成後、両端がライン上にある辺を
+`special_edges.csv`（mesh.bin の strc）へ書く。
+
+```yaml
+input:
+  special_edges:
+    file: special_edges.gpkg  # ROAD / CULVERT / Q などを 1 ファイルに
+    default_kind: ROAD        # kind 列が無い線。道路 / culvrt なども可
+    z_mode: absolute          # zc が絶対標高か、地盤からの相対高さ
+    match_tol: 2.0            # 辺対応付けの許容 [m]。0 なら自動
+```
+
+属性列の既定は `kind`, `zc`, `H`, `z_road`, `B`, `cover`, `z_mode`。`qgroup` は Q / W のときだけ。
+`zc` / `z_road` が無ければ辺の `z_crest`。`z_mode: relative` なら DEM に足す。
+`B` が 0 ならメッシュ辺長（カルバート開口幅はここに書く）。
+カルバートの `cover` は開口上の厚さ（常に m。`z_mode` の対象外）。天端は `zc + H + cover`。
+折れ線は折点で区間に分け、属性は区間ごとに載せる。
+特殊辺は近接・短尺を理由に拘束から落とさない。
+交差せずに下限より近い、または重なるときは距離の傾向を出して止める。
+
+幾何だけの拘束（堤防天端など、ソルバー kind を付けない線）は従来どおり
+`input.breaklines`。`breaklines.py` が間引き・ノーディング・外周帯との干渉回避
+を行い、特殊辺も同じ前処理を通る。
 
 参照レイヤ（OSM 道路等、`reference_layers`）は既定では診断表示専用。
 `features.reference_layers_for_size_field: true` にするとサイズ場だけを細かくする。
@@ -270,6 +304,7 @@ DEM から検出した盛り土天端線（`embankment_detection.py`）と OSM �
 5 m DEM 区域では `scripts/make_osm_road_breaklines.py` で OSM 道路を GPKG 化し、
 `input.breaklines.roads` に指定できる。幹線のみが既定で、`--all-classes` で
 全道路クラスを含められる（Kuma 全道路版は Gmsh が非常に重い）。
+ソルバーの道路堰・カルバートは `input.special_edges.file` にまとめる。
 
 ### 7. DEM からの盛り土検出
 
@@ -301,6 +336,7 @@ tool/
 │   ├── block_merge.py          ブロック成果物のマージ
 │   ├── block_helpers.py        ブロック分割ユーティリティ
 │   ├── io_vector.py            領域・拘束線・参照レイヤの読込
+│   ├── special_edges.py        特殊辺ラインの拘束化と辺対応付け
 │   ├── io_raster.py            DEM 読込
 │   ├── geometry_cleaning.py    領域ポリゴンの修復
 │   ├── boundary_quad_band.py   外周四角形帯
@@ -341,18 +377,19 @@ tool/
 
 - `face.gpkg` / `face.csv` — 面要素
 - `edge.gpkg` / `edge.csv` — 辺要素
-- `{project}.bin`（`output.cell_bin`）— AQWA 互換 cell.bin
+- `{project}.bin`（`output.cell_bin`）— AQWA が読む格子（中身は AQWAMESH）
 
 `--blocks` 実行時は各ブロックの中間出力が `blocks/block_NNN/` に残り
 （`parallel.keep_block_outputs: true`）、マージ後に統合 face/edge/cell.bin が
 データセット直下等に出力される。
 
-### cell.bin（ソルバー入力）
+### ソルバー入力（mesh.bin）
 
-`output.cell_bin.enabled: true` で `02_Solver` が読み込む Fortran stream
-unformatted を出力（`src/cell_bin_export.py`）。面の幾何・代表標高はメッシュから
-厳密に計算し、土地利用・土壌は指定ラスタとの重なりをピクセル単位で集計する。
-建物ポリゴンから `bld_ratio` / `bld_peri` を求める。入力未指定時は 0 埋め。
+`output.cell_bin.enabled: true` で `02_Solver` が読む AQWAMESH を出力する。
+面の幾何・代表標高はメッシュから計算し、土地利用・土壌は指定ラスタとの重なりを
+ピクセル単位で集計する。建物ポリゴン（`buildings`）から `chi_bld` / `bld_peri` を
+求める。植生ポリゴン（`vegetation`）から `chi_veg` と属性 `Cd` / `a` / `Hv`
+（列名は `veg_field_*` で変更可）を交差面積で面へ載せる。入力未指定時は 0 埋め。
 
 ## 既知の制限
 

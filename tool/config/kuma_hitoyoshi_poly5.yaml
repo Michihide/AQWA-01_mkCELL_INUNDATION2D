@@ -4,11 +4,11 @@
 # 仕上げに polygon_filter を外して全域を生成する。
 
 input:
-  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/input2.gpkg
   domain_min_area: 1000.0
   # domain_min_area 適用後、ファイル順のインデックス。null で全 30 ポリゴン。
   polygon_filter: [5]
-  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/input_gpkg_tif/kuma_5mDEM.tif
 
   # 精度が担保された線データのみをここに書く。メッシュ辺として拘束される。
   # 球磨川では現時点で検証済みの堤防・法線データが無いため未指定。
@@ -29,7 +29,7 @@ mesh:
   global_max_size: 150.0
 
   boundary_quad_band:
-    enabled: true
+    enabled: false
     method: transfinite
     # 境界は堤防を再現する重要度が高いため、帯四角形は面積下限と同じ
     # サイズにする。堤防の再現性を優先し、境界に接する要素には面積下限を

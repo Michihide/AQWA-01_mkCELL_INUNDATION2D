@@ -448,6 +448,29 @@ def _merge_undersized_quads(
     return pts, band, n_removed, max_dev
 
 
+def triangle_only_polygon_band(poly: Polygon, spacing: float) -> PolygonBand:
+    """四角形帯を置かず、外周をリサンプリングした三角形領域だけを返す。"""
+    exterior_pts, hole_pts = polygon_rings_resampled(poly, spacing)
+
+    def _skipped_ring(pts: np.ndarray, is_hole: bool) -> RingBand:
+        n = len(pts)
+        return RingBand(
+            outer=pts,
+            inner=np.array(pts, copy=True),
+            widths=np.zeros(n),
+            is_hole=is_hole,
+            skipped=set(range(n)),
+        )
+
+    return PolygonBand(
+        polygon=poly,
+        exterior=_skipped_ring(exterior_pts, False),
+        holes=[_skipped_ring(pts, True) for pts in hole_pts],
+        interior=poly,
+        ok=True,
+    )
+
+
 def build_polygon_band(
     poly: Polygon,
     width: float,

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_config  # noqa: E402
 from src.io_vector import load_domain  # noqa: E402
+from src.special_edges import pick_clear_indices  # noqa: E402
 
 # 盛土構造を持ちやすく、氾濫流を実際に分断する種別
 DEFAULT_CLASSES = ["motorway", "trunk", "primary", "secondary"]
@@ -48,6 +49,8 @@ def main() -> None:
                     help="fclass による種別フィルタを行わず全道路を含める")
     ap.add_argument("--min-length", type=float, default=None,
                     help="これより短い線分を除外 [m]（省略時: 幹線 200 / 全道路 30）")
+    ap.add_argument("--min-clearance", type=float, default=0.0,
+                    help="これより近い線（交差以外）は長い方を残して落とす [m]")
     args = ap.parse_args()
 
     min_length = args.min_length
@@ -74,6 +77,17 @@ def main() -> None:
     for col in ("bridge", "tunnel"):
         if col in out.columns:
             out = out[~out[col].astype(str).str.upper().isin(["T", "TRUE", "YES", "1"])]
+    out = out.reset_index(drop=True)
+
+    if args.min_clearance > 0.0 and len(out) > 1:
+        geoms = [g for g in out.geometry]
+        keep_i = pick_clear_indices(geoms, args.min_clearance)
+        dropped = len(out) - len(keep_i)
+        out = out.iloc[keep_i].reset_index(drop=True)
+        print(
+            f"近接間引き: 下限 {args.min_clearance:.0f} m、"
+            f"{dropped} 本を落とし {len(out)} 本を残した"
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_file(args.out, layer="roads", driver="GPKG")

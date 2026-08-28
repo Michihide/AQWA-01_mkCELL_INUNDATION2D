@@ -9,12 +9,16 @@
 
 # --- 入力 ---
 input:
-  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/input_gpkg.gpkg
+  domain: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/input_gpkg.gpkg
   domain_min_area: 0
   polygon_filter: null
-  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Hii/input_gpkg_tif/DEM1M.tif
+  dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/DEM1M.tif
   breaklines:
     embankments: ../data/hii_embankments.gpkg
+  # 特殊辺ライン（計算範囲と同時に定め、拘束条件にしてからメッシュを切る）
+  # special_edges:
+  #   file: ../data/hii_special_edges.gpkg
+  #   default_kind: ROAD
   reference_layers:
     osm_roads: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/chugoku-latest-free.shp/gis_osm_roads_free_1.shp
 
@@ -29,7 +33,7 @@ mesh:
   global_max_size: 150.0
 
   boundary_quad_band:
-    enabled: true
+    enabled: false
     method: transfinite
     width: 25.0
     target_size: 25.0
@@ -96,14 +100,14 @@ output:
   save_diagnostics: true
   save_iteration_meshes: false
   gpkg_csv:
-    directory: ../../Cell/Hii/output_gpkg_csv
+    directory: ../../Mesh/Hii/output_gpkg_csv
     face_gpkg: face.gpkg
     edge_gpkg: edge.gpkg
     face_csv: face.csv
     edge_csv: edge.csv
   cell_bin:
     enabled: true
-    directory: ../../Cell/Hii
+    directory: ../../Mesh/Hii
     filename: Hii.bin
     landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Landuse_100m.tif
     landuse_epsg: 6668

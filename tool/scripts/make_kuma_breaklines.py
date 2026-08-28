@@ -25,7 +25,7 @@ CROSS_SECTIONS = Path(
     "Kuma_Hitoyoshi/gpkg_etc/selected_cross_section.gpkg"
 )
 DOMAIN = Path(
-    "/Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Cell/Kuma_Hitoyoshi/"
+    "/Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Kuma_Hitoyoshi/"
     "input_gpkg_tif/input2.gpkg"
 )
 TARGET_EPSG = 6670

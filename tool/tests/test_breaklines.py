@@ -40,6 +40,8 @@ def _config(tmp_path, data_dir, **overrides) -> str:
         embankments: {data_dir / 'synthetic_breaklines.gpkg'}
     mesh:
       max_iterations: {overrides.get('max_iterations', 1)}
+      boundary_quad_band:
+        enabled: true
     terrain:
       plane_fit_rmse_max: 100.0
       slope_direction_spread_max_deg: 180.0

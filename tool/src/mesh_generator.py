@@ -87,7 +87,9 @@ def generate_mesh(
     apply_mesh_options(cfg)
     set_background_field(size_field)
 
+    logger.info("Gmsh 2D 生成を開始（algorithm=%d）", cfg.gmsh.algorithm_2d)
     gmsh.model.mesh.generate(2)
+    logger.info("Gmsh 2D 生成が完了")
     optimize_mesh(cfg)
 
     # 帯端の三角形も Transfinite で分割数が決まっており動かせないので帯扱い

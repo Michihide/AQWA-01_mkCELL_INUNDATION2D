@@ -91,6 +91,7 @@ def test_band_smaller_than_area_floor_is_rejected(tmp_path):
     path = _write(tmp_path, MINIMAL, """
     mesh:
       boundary_quad_band:
+        enabled: true
         width: 10.0
         target_size: 20.0
     """)
