@@ -62,6 +62,8 @@ input:
     # field_B: B
     # field_cover: cover
     # field_z_mode: z_mode
+    # field_fr: fr
+    default_fr: 0.0                 # ラインに fr が無い FROUDE 用。外周全体は output.default_fr
   breaklines:
     embankments: ../input/embankments.gpkg
 
@@ -69,6 +71,7 @@ crs:
   target_epsg: 6670          # メートル単位の投影座標系。4326 / 3857 は不可
 
 output:
+  default_fr: 0.35           # 特殊辺でない外周辺。0 なら塗らない
   cell_bin:
     enabled: true
     filename: mesh.bin
@@ -91,13 +94,14 @@ output:
 | `Q` | 流量境界 | `qgroup` | `e_qgroup`。時系列はソルバー YAML |
 | `W` | 水位境界 | `qgroup`（任意） | 辺を水位境界として印す。水位時系列は YAML |
 | `WALL` | 壁 | なし | 辺を印すだけ。外周を自動では付けない |
+| `FROUDE` | フルード流出 | `fr` | 辺の `fr` に書く。qin 未指定ならソルバーが使う |
 | `NONE` | 無視 | — | 書かない |
 
 大文字小文字は問わない。`道路` / `堰` / `カルバート` / `暗渠` などの別名と、
 近い綴り（`culvrt` → `CULVERT`）も通す。`NONE` と空欄はスキップする。
 
 同じ辺に複数ラインが重なったときは、
-`WALL` > `Q` / `W` > `CULVERT` > `ROAD` の順で残す。
+`WALL` > `Q` / `W` > `FROUDE` > `CULVERT` > `ROAD` の順で残す。
 
 ## ラインの属性
 
@@ -116,6 +120,7 @@ CRS は `crs.target_epsg` と同じメートル投影。計算範囲の外は切
 | `cover` | `T`, `thickness`, `土被り` | m | 常に厚さ m。カルバートでは天端を `zc+H+cover` にする。無ければ `z_road` |
 | `z_mode` | `z_ref`, `datum` | `absolute` / `relative` | YAML の `z_mode`。行ごと上書き可 |
 | `qgroup` | `q_group`, `e_qgroup` | 整数 | **Q / W のときだけ**。ROAD / CULVERT には不要 |
+| `fr` | `Fr`, `froude` | 0–1 | `FROUDE` の指定フルード数。無ければ `output.default_fr` |
 
 `z_mode: absolute`（絶対標高）が既定。`relative` なら `zc` / `z_road` を辺中点 DEM に足す。
 `絶対` / `相対` でもよい。
@@ -136,9 +141,10 @@ QGIS では計算範囲と同じ投影でラインを引き、上の列を付け
 7. `special_edges.csv` と mesh.bin の **strc** セクションに書く。
 
 ```
-edge_id,kind,zc,H,z_road,qgroup,B
-12,ROAD,12.40,0.0,12.40,0,0.0
-48,CULVERT,10.00,1.5,12.00,0,3.0
+edge_id,kind,zc,H,z_road,qgroup,B,fr
+12,ROAD,12.40,0.0,12.40,0,0.0,0.0
+48,CULVERT,10.00,1.5,12.00,0,3.0,0.0
+80,FROUDE,0.0,0.0,0.0,0,0.0,0.35
 ```
 
 `edge_id` は 1 始まり。`face.gpkg` / `edge.gpkg` の辺番号と同じ規則。

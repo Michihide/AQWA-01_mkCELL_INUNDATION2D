@@ -41,7 +41,7 @@ mkMESH が作業ファイルを書き、`pack_mesh` が `mesh.bin` に固める�
 | id | i32 | 点 id |
 | x, y, z | f64 | 座標 [m]。`z` は点標高 |
 
-**`edge.bin`** — `nedge` レコード、各 28 B
+**`edge.bin`** — `nedge` レコード、各 36 B（旧ファイルは 28 B。読込はセクション長で判別）
 
 | フィールド | 型 | 意味 |
 |---|---|---|
@@ -49,6 +49,7 @@ mkMESH が作業ファイルを書き、`pack_mesh` が `mesh.bin` に固める�
 | v1, v2 | i32 | 端点 id（左面 CCW） |
 | face_left, face_right | i32 | 左右の面 id。外辺の right は 0 |
 | z_crest | f64 | 天端標高 [m]（辺中点の DEM。欠損時は端点 `z` の平均） |
+| fr | f64 | 未指定外辺の流出フルード数。0 なら付けない。内部辺は 0 |
 
 **`face.bin`** — 可変長。各面:
 
@@ -81,18 +82,18 @@ mkMESH は `output.cell_bin.vegetation` でポリゴンを指定する。列名�
 **`special_edges.csv`**（UTF-8、先頭行がヘッダ）
 
 ```
-edge_id,kind,zc,H,z_road,qgroup,B
+edge_id,kind,zc,H,z_road,qgroup,B,fr
 ```
 
-`kind` は `NONE` / `ROAD` / `CULVERT` / `Q` / `W` / `WALL`（大文字小文字は無視）。
-空ファイルはヘッダのみでよい。
+`kind` は `NONE` / `ROAD` / `CULVERT` / `Q` / `W` / `WALL` / `FROUDE`（大文字小文字は無視）。
+`fr` は `FROUDE` 辺、または `output.default_fr` で塗る外周辺のフルード数。空ファイルはヘッダのみでよい。
 
 mkMESH では **計算範囲と特殊辺ラインを先に定め**、ラインを Gmsh の拘束条件にしてから
 メッシュを切る。生成後、両端がライン上にある辺を `special_edges.csv` に書く。
 YAML は `input.special_edges.file`（1 ファイル。`kind` 列で ROAD / CULVERT 等を区別。無ければ `default_kind`）。
 特殊辺は近接を理由に拘束から落とさない。交差せずに下限より近い／重なる入力は
 距離の傾向を出して止める。
-属性列の既定は `kind`, `zc`, `H`, `z_road`, `qgroup`, `B`, `cover`。`zc` / `z_road` が無ければ辺の `z_crest`。`B` が 0 なら辺長。
+属性列の既定は `kind`, `zc`, `H`, `z_road`, `qgroup`, `B`, `cover`, `fr`。`zc` / `z_road` が無ければ辺の `z_crest`。`B` が 0 なら辺長。`fr` は `FROUDE` または `output.default_fr`。
 カルバートに `cover` があれば天端は `zc + H + cover`（`cover` は常に厚さ m）。
 幾何だけの拘束は従来どおり `input.breaklines`。旧 cell.bin からの変換は空のまま。
 
@@ -165,11 +166,27 @@ edge_id,river_link,kp,bank
   | qgroup | i32 |
   | B | f64 |
 
-  `kind`: 0=NONE, 1=ROAD, 2=CULVERT, 4=Q, 5=W, 6=WALL（3 は欠番）
+  `kind`: 0=NONE, 1=ROAD, 2=CULVERT, 4=Q, 5=W, 6=WALL, 7=FROUDE（3 は欠番）
 
 - **couple**: `nentry` (u32) のあと各 20 B: `edge_id` (i32), `river_link` (i32), `kp` (f64), `bank` (i32)
 
 各エンティティは 1 回だけ。空セクションは `length = 0`、または疎配列なら `nentry = 0`。
+
+### 氾濫ブロックトレーラー（任意）
+
+版は **1 のまま**。ヘッダのセクション数は 9。旧ファイル（トレーラー無し）は全面 `block_id = 1`。
+新規の `pack_mesh` は常にトレーラーを付ける。
+
+最終セクションの末尾の直後:
+
+| フィールド | 型 | 内容 |
+|---|---|---|
+| magic | 8 B | `AQWABLK1` |
+| nface | u32 | ヘッダの `nface` と一致 |
+| block_id[nface] | i32 | 面ごとの氾濫ブロック番号（**1 始まり**） |
+
+`--blocks` ではディレクトリ `block_NNN` の `NNN+1`。単一ポリゴンなら 1。
+GIS の `face.csv` / `face.gpkg` にも同じ `block` 列を書く。
 
 ## ソルバーが計算する派生量
 
@@ -178,6 +195,7 @@ edge_id,river_link,kp,bank
 - 辺長、中点、端点座標
 - `fn_self` = `face_left`、`fn_adj` = `face_right`
 - 外辺は `bc_flag = 1`
+- 辺の `fr` > 0 かつ qin 未指定の外辺 → フルード流出（`INUN_BC_FROUDE`）
 - `A_CV`（両側面積の和。外辺は自面のみ）
 - 重心間距離 `dl` と単位方向 `dx/dl`, `dy/dl`
 - 辺中点への逆距離重み（自面・隣面・面側）

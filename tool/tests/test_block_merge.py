@@ -39,6 +39,7 @@ def test_merge_two_blocks(tmp_path: Path):
     edge = gpd.read_file(out / "edge.gpkg", layer="line")
     assert len(face) == 4
     assert list(face["CN"]) == [1, 2, 3, 4]
+    assert list(face["block"]) == [1, 1, 2, 2]
     assert (edge["LN"] == edge["LineID"]).all()
 
 

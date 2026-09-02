@@ -30,7 +30,7 @@ python run.py --config ../Mesh/Hii/yaml/mesh_config.yaml
 ### 氾濫ブロック並列（Kuma 等）
 
 解析領域を氾濫ブロック（ポリゴン）単位に分割し、ブロックごとに Gmsh を回して
-face/edge/cell.bin をマージする。YAML の `parallel.enabled: true` でも有効だが、
+face/edge/`mesh.bin` をマージする。YAML の `parallel.enabled: true` でも有効だが、
 明示的には `--blocks` を付ける。
 
 ```bash
@@ -154,6 +154,7 @@ gmsh/
 | `parallel.*` | 氾濫ブロック並列（`enabled`, `workers` 等） |
 | `output.gpkg_csv.*` | ソルバー向け `face.gpkg` / `edge.gpkg` |
 | `output.cell_bin.*` | AQWA 互換 `cell.bin` |
+| `output.default_fr` | 特殊辺でない外周辺の流出フルード数（既定 0.35。0 なら塗らない） |
 
 ### 設定例（`Hii/yaml/mesh_config.yaml`）
 
@@ -194,7 +195,9 @@ output:
 ```
 
 `--blocks` 指定時は、上記を氾濫ブロックごとに実行し、`block_merge.py` で
-face/edge/cell.bin を統合する。
+face/edge を統合する。各面の `block`（1 始まりのポリゴン番号）は CSV / GPKG と
+`mesh.bin` 末尾の `AQWABLK1` トレーラーに残す。旧 `mesh.bin`（トレーラー無し）は
+全面ブロック 1 として読める。
 
 反復は `src/main.py` の `_iterate()` が担う。各反復で全基準を満たすか
 `mesh.max_iterations` に達すると終了する。**面積下限に到達したために解消

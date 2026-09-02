@@ -47,6 +47,8 @@ def test_face_edge_gpkg_schema(tmp_path: Path):
     face = gpd.read_file(face_path)
     edge = gpd.read_file(edge_path)
     assert "CN" in face.columns
+    assert "block" in face.columns
+    assert list(face["block"]) == [1, 1]
     assert "area" in face.columns
     assert "soil_1_area" in face.columns
     assert list(face["CN"]) == [1, 2]

@@ -31,6 +31,8 @@ class Mesh:
     constrained_edges: np.ndarray = field(
         default_factory=lambda: np.zeros((0, 2), dtype=np.int64)
     )
+    # 面ごとの氾濫ブロック id（1 始まり）。未設定なら pack 時に 1。
+    block_id: np.ndarray | None = None
 
     @property
     def n_elements(self) -> int:

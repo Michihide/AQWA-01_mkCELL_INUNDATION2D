@@ -18,6 +18,14 @@ from .utils import get_logger
 NODE_PRECISION = 4
 
 
+def _block_id_from_dir(block_dir: Path) -> int:
+    """`block_000` → 1。ディレクトリ番号は 0 始まりのポリゴン index。"""
+    try:
+        return int(str(block_dir.name).rsplit("_", 1)[1]) + 1
+    except (IndexError, ValueError):
+        return 1
+
+
 def _reclassify_global_edge_ids(df_edge: pd.DataFrame) -> pd.DataFrame:
     """ブロック境界を跨ぐ内部辺の ID を 0 に直す（01_mkMESH merge_blocks 相当）。"""
     incidence = df_edge[["LN", "CN"]].drop_duplicates()
@@ -86,6 +94,7 @@ def merge_block_csvs(
 
         df_face = df_face.copy()
         df_face["CN"] = df_face["CN"].astype(np.int64) + cn_offset
+        df_face["block"] = _block_id_from_dir(block_dir)
 
         df_edge = df_edge.copy()
         required = ["CN", "LN", "node_id", "StartNode", "EndNode", "xcoord", "ycoord"]

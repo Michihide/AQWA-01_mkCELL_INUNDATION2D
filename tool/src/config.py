@@ -65,6 +65,7 @@ class SpecialEdgeInputs:
     default_kind: str = "ROAD"
     # 生成後の辺対応付け許容距離 [m]。0 なら global_min_size の 5%（下限 1 m）。
     match_tol: float = 0.0
+    default_fr: float = 0.0
     field_kind: str = "kind"
     field_zc: str = "zc"
     field_H: str = "H"
@@ -73,6 +74,7 @@ class SpecialEdgeInputs:
     field_cover: str = "cover"
     field_qgroup: str = "qgroup"
     field_z_mode: str = "z_mode"
+    field_fr: str = "fr"
     # zc / z_road の意味。absolute=標高、relative=地盤（z_crest）からの高さ。
     z_mode: str = "absolute"
 
@@ -365,6 +367,8 @@ class GpkgCsvConfig:
 class OutputConfig:
     directory: str = "output"
     basename: str = "mesh"
+    # 特殊辺でない外周辺の流出フルード数。0 なら塗らない。
+    default_fr: float = 0.35
     save_diagnostics: bool = True
     save_iteration_meshes: bool = True
     write_vtu: bool = True
@@ -590,10 +594,14 @@ def _validate(cfg: Config) -> None:
     except ValueError as exc:
         raise ConfigError(
             f"input.special_edges.default_kind='{se.default_kind}' は "
-            "ROAD / CULVERT / Q / W / WALL のどれかです"
+            "ROAD / CULVERT / Q / W / WALL / FROUDE のどれかです"
         ) from exc
     if se.default_kind == "NONE":
         raise ConfigError("input.special_edges.default_kind に NONE は使えません")
+    if se.default_fr < 0.0 or se.default_fr > 1.0:
+        raise ConfigError("input.special_edges.default_fr は 0 以上 1 以下です")
+    if cfg.output.default_fr < 0.0 or cfg.output.default_fr > 1.0:
+        raise ConfigError("output.default_fr は 0 以上 1 以下です")
     try:
         se.z_mode = parse_z_mode(se.z_mode)
     except ValueError as exc:
@@ -609,6 +617,7 @@ def _validate(cfg: Config) -> None:
         ("field_cover", se.field_cover),
         ("field_qgroup", se.field_qgroup),
         ("field_z_mode", se.field_z_mode),
+        ("field_fr", se.field_fr),
     ):
         if not str(val).strip():
             raise ConfigError(f"input.special_edges.{name} は空にできません")

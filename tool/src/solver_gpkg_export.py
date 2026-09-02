@@ -32,6 +32,27 @@ from .terrain_metrics import TerrainReport
 from .utils import get_logger
 
 
+def face_block_ids(
+    n: int,
+    mesh: Mesh | None = None,
+    polygon_filter: list[int] | None = None,
+    block: np.ndarray | None = None,
+) -> np.ndarray:
+    """面ごとの 1 始まり block_id。明示指定 → mesh.block_id → 単一 polygon_filter → 1。"""
+    if block is not None:
+        arr = np.asarray(block, dtype=np.int32)
+        if arr.shape != (n,):
+            raise ValueError("block の長さが面数と一致しません")
+        return arr
+    if mesh is not None and mesh.block_id is not None:
+        arr = np.asarray(mesh.block_id, dtype=np.int32)
+        if arr.shape == (n,):
+            return arr
+    if polygon_filter is not None and len(polygon_filter) == 1:
+        return np.full(n, int(polygon_filter[0]) + 1, dtype=np.int32)
+    return np.ones(n, dtype=np.int32)
+
+
 def _node_elevations(mesh: Mesh, dem: DemGrid | None) -> np.ndarray:
     if mesh.node_z is not None and np.any(mesh.node_z != 0):
         z = mesh.node_z.copy()
@@ -68,6 +89,9 @@ def write_face_gpkg(
     attrs: CellAttributes,
     crs: CRS,
     path: Path,
+    *,
+    polygon_filter: list[int] | None = None,
+    block: np.ndarray | None = None,
 ) -> Path:
     polys = [Polygon(coords) for coords in mesh.element_polygons()]
     n = len(polys)
@@ -89,6 +113,7 @@ def write_face_gpkg(
 
     data = {
         "CalMesh": np.zeros(n, dtype=np.int32),
+        "block": face_block_ids(n, mesh, polygon_filter, block),
         "area": areas,
         "CN": np.arange(1, n + 1, dtype=np.int32),
         "bill_area": bill_area,
@@ -180,6 +205,9 @@ def write_face_csv(
     terrain: TerrainReport,
     attrs: CellAttributes,
     path: Path,
+    *,
+    polygon_filter: list[int] | None = None,
+    block: np.ndarray | None = None,
 ) -> Path:
     n = mesh.n_elements
     areas = quality.area
@@ -193,6 +221,7 @@ def write_face_csv(
     ratio = np.minimum(ratio, 0.95)
     df = pd.DataFrame({
         "CN": np.arange(1, n + 1, dtype=np.int32),
+        "block": face_block_ids(n, mesh, polygon_filter, block),
         "bill_area": bill_area,
         "area": areas,
         "ratio": ratio,
@@ -263,9 +292,15 @@ def write_solver_gpkg_csv(
 
     face_gpkg = out_dir / gc.face_gpkg
     edge_gpkg = out_dir / gc.edge_gpkg
-    write_face_gpkg(mesh, quality, terrain, attrs, crs, face_gpkg)
+    write_face_gpkg(
+        mesh, quality, terrain, attrs, crs, face_gpkg,
+        polygon_filter=cfg.input.polygon_filter,
+    )
     write_edge_gpkg(mesh, quality, dem, crs, edge_gpkg)
     if gc.enabled:
-        write_face_csv(mesh, quality, terrain, attrs, out_dir / gc.face_csv)
+        write_face_csv(
+            mesh, quality, terrain, attrs, out_dir / gc.face_csv,
+            polygon_filter=cfg.input.polygon_filter,
+        )
         write_edge_csv(mesh, quality, dem, out_dir / gc.edge_csv)
     return face_gpkg, edge_gpkg

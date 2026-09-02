@@ -47,6 +47,8 @@ def merge_block_meshes(cfg: Config, block_indices: list[int]) -> Mesh:
     tri_surf: list[np.ndarray] = []
     quad_surf: list[np.ndarray] = []
     node_offset = 0
+    tri_blocks: list[np.ndarray] = []
+    quad_blocks: list[np.ndarray] = []
 
     for idx in block_indices:
         path = block_mesh_path(cfg, idx)
@@ -54,14 +56,23 @@ def merge_block_meshes(cfg: Config, block_indices: list[int]) -> Mesh:
             raise FileNotFoundError(f"ブロックメッシュがありません: {path}")
         m = load_mesh_from_msh(path)
         nodes_parts.append(m.nodes)
+        bid = np.int32(idx + 1)
         if len(m.triangles):
             tris_parts.append(m.triangles + node_offset)
             tri_surf.append(m.tri_surface)
+            tri_blocks.append(np.full(len(m.triangles), bid, dtype=np.int32))
         if len(m.quads):
             quads_parts.append(m.quads + node_offset)
             quad_surf.append(m.quad_surface)
+            quad_blocks.append(np.full(len(m.quads), bid, dtype=np.int32))
         node_offset += m.n_nodes
 
+    block_parts = tri_blocks + quad_blocks
+    block_id = (
+        np.concatenate(block_parts)
+        if block_parts
+        else np.empty(0, dtype=np.int32)
+    )
     return Mesh(
         nodes=np.vstack(nodes_parts),
         triangles=np.vstack(tris_parts) if tris_parts else np.empty((0, 3), dtype=np.int64),
@@ -69,6 +80,7 @@ def merge_block_meshes(cfg: Config, block_indices: list[int]) -> Mesh:
         tri_surface=np.concatenate(tri_surf) if tri_surf else np.empty(0, dtype=np.int64),
         quad_surface=np.concatenate(quad_surf) if quad_surf else np.empty(0, dtype=np.int64),
         surface_roles={1: "interior"},
+        block_id=block_id,
     )
 
 

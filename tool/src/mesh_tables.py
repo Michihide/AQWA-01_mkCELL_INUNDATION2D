@@ -40,9 +40,16 @@ class EdgeTable:
     face_left: np.ndarray
     face_right: np.ndarray
     z_crest: np.ndarray
+    fr: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
     def __len__(self) -> int:
         return int(len(self.id))
+
+    def froude(self) -> np.ndarray:
+        n = len(self)
+        if len(self.fr) == n:
+            return np.asarray(self.fr, dtype=np.float64)
+        return np.zeros(n, dtype=np.float64)
 
 
 @dataclass
@@ -55,9 +62,16 @@ class FaceTable:
     z_bed: np.ndarray
     n_sides: np.ndarray
     edge_ids: list[np.ndarray] = field(default_factory=list)
+    block: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
 
     def __len__(self) -> int:
         return int(len(self.id))
+
+    def block_ids(self) -> np.ndarray:
+        n = len(self)
+        if len(self.block) == n:
+            return np.asarray(self.block, dtype=np.int32)
+        return np.ones(n, dtype=np.int32)
 
 
 @dataclass
@@ -106,6 +120,7 @@ def build_normalized_tables(
     face_left = np.zeros(n_edge, dtype=np.int32)
     face_right = np.zeros(n_edge, dtype=np.int32)
     z_crest = np.zeros(n_edge, dtype=np.float64)
+    fr = np.zeros(n_edge, dtype=np.float64)
     seen = np.zeros(n_edge, dtype=bool)
 
     x_a, y_a = mesh.nodes[node_a, 0], mesh.nodes[node_a, 1]
@@ -159,6 +174,7 @@ def build_normalized_tables(
         z_bed=np.asarray(elevation, dtype=np.float64),
         n_sides=np.array([len(e) for e in face_edge_ids], dtype=np.int32),
         edge_ids=[np.asarray(e, dtype=np.int32) for e in face_edge_ids],
+        block=np.ones(n_face, dtype=np.int32),
     )
     edges = EdgeTable(
         id=np.arange(1, n_edge + 1, dtype=np.int32),
@@ -167,6 +183,7 @@ def build_normalized_tables(
         face_left=face_left,
         face_right=face_right,
         z_crest=z_crest,
+        fr=fr,
     )
     return NormalizedMesh(nodes=nodes, edges=edges, faces=faces)
 

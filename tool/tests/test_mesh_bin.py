@@ -7,14 +7,20 @@ from pyproj import CRS
 from src.cell_bin_export import LANDUSE_CODES, SOIL_CODES, write_cell_bin
 from src.io_raster import DemGrid
 from src.mesh_bin_io import (
+    BLK_MAGIC,
+    KIND_FROUDE,
     KIND_Q,
     KIND_ROAD,
     MeshAttributes,
     SpecialEdgeTable,
     CoupleTable,
     VegTable,
+    apply_boundary_froude,
     building_from_dense,
+    decode_edges,
     dense_areas_to_sparse,
+    encode_block_trailer,
+    encode_edges,
     pack_mesh,
     pack_work_directory,
     read_work_files,
@@ -124,10 +130,26 @@ def test_pack_roundtrip_and_coords_only_on_nodes(tmp_path):
     assert len(packed.mesh.faces) == 2
     np.testing.assert_allclose(packed.mesh.nodes.x, tables.nodes.x)
     np.testing.assert_allclose(packed.mesh.nodes.y, tables.nodes.y)
-    # 辺レコードに座標フィールドは無い（28 B = id + 4*i32 + f64）
+    # 辺レコードに座標フィールドは無い（36 B = id + 4*i32 + z_crest + fr）
     assert path.stat().st_size > 320
     raw = path.read_bytes()
     assert raw[:8] == b"AQWAMESH"
+    assert BLK_MAGIC in raw
+    np.testing.assert_array_equal(packed.mesh.faces.block, [1, 1])
+
+
+def test_block_trailer_roundtrip_and_legacy_ones():
+    tables = build_normalized_tables(_mesh(), _quality(), _terrain(), _dem())
+    tables.faces.block = np.array([1, 2], dtype=np.int32)
+    packed = unpack_mesh(pack_mesh(tables, epsg=6670))
+    np.testing.assert_array_equal(packed.mesh.faces.block, [1, 2])
+
+    raw = pack_mesh(tables, epsg=6670)
+    trailer = encode_block_trailer(tables.faces.block)
+    legacy = raw[: -len(trailer)]
+    assert BLK_MAGIC not in legacy
+    old = unpack_mesh(legacy)
+    np.testing.assert_array_equal(old.mesh.faces.block, [1, 1])
 
 
 def test_attributes_landuse_soil_building_dummy(tmp_path):
@@ -232,7 +254,7 @@ def test_cell_bin_to_mesh_dedups_edges(tmp_path):
     np.testing.assert_allclose(packed.mesh.faces.A, [100.0, 100.0])
     assert packed.attrs.building.chi_bld[0] == pytest.approx(0.1)
     assert packed.attrs.building.bld_peri[0] == pytest.approx(4.0)
-    # 点座標は node のみ。辺セクションは 7 * 28 B
+    # 点座標は node のみ。辺セクションは 7 * 36 B（+fr）または旧 7 * 28 B
     raw = unpack_mesh(mesh_path.read_bytes())
     assert raw.mesh.nodes.z.shape == (6,)
     tables, _ = read_cell_bin(out_cell)
@@ -257,3 +279,59 @@ def test_vegetation_polygon_params():
     assert cd[0] == pytest.approx(1.2)
     assert chi[1] == pytest.approx(0.0)
     assert a[1] == pytest.approx(0.0)
+
+
+def test_edge_fr_roundtrip_and_legacy_28():
+    tables = build_normalized_tables(_mesh(), _quality(), _terrain(), _dem())
+    fr = np.zeros(len(tables.edges))
+    outer = tables.edges.face_right == 0
+    fr[outer] = 0.5
+    tables.edges.fr = fr
+    packed = unpack_mesh(pack_mesh(tables, epsg=6670))
+    np.testing.assert_allclose(packed.mesh.edges.fr[outer], 0.5)
+    np.testing.assert_allclose(packed.mesh.edges.fr[~outer], 0.0)
+
+    raw36 = encode_edges(tables.edges)
+    # 新形式は 36 B。旧 28 B も読める。
+    assert len(raw36) == len(tables.edges) * 36
+    legacy = b"".join(
+        raw36[i * 36:i * 36 + 28] for i in range(len(tables.edges))
+    )
+    old = decode_edges(legacy, nedge=len(tables.edges))
+    np.testing.assert_allclose(old.fr, 0.0)
+    np.testing.assert_array_equal(old.v1, tables.edges.v1)
+
+
+def test_apply_boundary_froude_skips_wall_and_inlet():
+    tables = build_normalized_tables(_mesh(), _quality(), _terrain(), _dem())
+    outer = np.where(tables.edges.face_right == 0)[0]
+    wall_eid = int(tables.edges.id[outer[0]])
+    open_eid = int(tables.edges.id[outer[1]])
+    apply_boundary_froude(
+        tables.edges,
+        SpecialEdgeTable(
+            edge_id=np.array([wall_eid], dtype=np.int32),
+            kind=np.array([KIND_ROAD], dtype=np.int32),
+            zc=np.array([0.0]),
+            H=np.array([0.0]),
+            z_road=np.array([0.0]),
+            qgroup=np.array([0], dtype=np.int32),
+        ),
+        default_fr=0.3,
+    )
+    assert tables.edges.fr[wall_eid - 1] == pytest.approx(0.0)
+    assert tables.edges.fr[open_eid - 1] == pytest.approx(0.3)
+    apply_boundary_froude(
+        tables.edges,
+        SpecialEdgeTable(
+            edge_id=np.array([open_eid], dtype=np.int32),
+            kind=np.array([KIND_FROUDE], dtype=np.int32),
+            zc=np.array([0.0]),
+            H=np.array([0.0]),
+            z_road=np.array([0.0]),
+            qgroup=np.array([0], dtype=np.int32),
+            fr=np.array([0.5]),
+        ),
+        default_fr=0.3,
+    )
+    assert tables.edges.fr[open_eid - 1] == pytest.approx(0.5)

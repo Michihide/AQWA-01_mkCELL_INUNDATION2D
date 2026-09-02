@@ -11,11 +11,15 @@ from .cell_bin_export import LANDUSE_CODES, SOIL_CODES, CellAttributes, compute_
 from .config import Config
 from .io_raster import DemGrid
 from .mesh_bin_io import (
+    WORK_FILES,
     MeshAttributes,
+    apply_boundary_froude,
     building_from_dense,
+    default_fr_from_config,
     dense_areas_to_sparse,
-    pack_work_directory,
+    hash_file,
     veg_from_dense,
+    write_mesh_bin,
     write_work_files,
 )
 from .mesh_parser import Mesh
@@ -23,6 +27,7 @@ from .mesh_tables import build_normalized_tables
 from .quality_metrics import QualityReport
 from .special_edges import special_edges_for_mesh
 from .terrain_metrics import TerrainReport
+from .solver_gpkg_export import face_block_ids
 from .utils import get_logger
 
 
@@ -62,17 +67,33 @@ def build_and_write_mesh_bin(
 
     dummy = np.zeros(mesh.n_elements, dtype=np.int32)
     tables = build_normalized_tables(mesh, quality, terrain, dem, dummy=dummy)
+    tables.faces.block = face_block_ids(
+        len(tables.faces), mesh, cfg.input.polygon_filter,
+    )
     mesh_attrs = attributes_to_mesh_attrs(attrs)
     mesh_attrs.special_edges = special_edges_for_mesh(cfg, tables)
+    apply_boundary_froude(
+        tables.edges,
+        mesh_attrs.special_edges,
+        mesh_attrs.couple,
+        default_fr=default_fr_from_config(cfg),
+    )
 
     filename = cb.filename or "mesh.bin"
     out_dir = cfg.cell_bin_dir
     work_dir = out_dir / "mesh_work"
     write_work_files(work_dir, tables, mesh_attrs)
     output_path = out_dir / filename
-    pack_work_directory(work_dir, output_path, epsg=int(crs.to_epsg() or cfg.crs.target_epsg))
+    hashes = [hash_file(work_dir / name) for name in WORK_FILES]
+    write_mesh_bin(
+        output_path, tables, mesh_attrs,
+        epsg=int(crs.to_epsg() or cfg.crs.target_epsg),
+        hashes=hashes,
+    )
+    n_block = int(tables.faces.block.max()) if len(tables.faces) else 1
     logger.info(
-        "mesh.bin を出力: %s（点 %d, 辺 %d, 面 %d）",
-        output_path.name, len(tables.nodes), len(tables.edges), len(tables.faces),
+        "mesh.bin を出力: %s（点 %d, 辺 %d, 面 %d, ブロック %d）",
+        output_path.name, len(tables.nodes), len(tables.edges),
+        len(tables.faces), n_block,
     )
     return output_path

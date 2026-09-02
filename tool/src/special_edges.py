@@ -43,11 +43,13 @@ _B_ALIASES = ("B", "Bstr", "e_Bstr", "width", "opening_width")
 _COVER_ALIASES = ("cover", "T", "thickness", "overburden", "土被り")
 _QGROUP_ALIASES = ("qgroup", "q_group", "Qgroup", "e_qgroup")
 _ZMODE_ALIASES = ("z_mode", "zmode", "z_ref", "datum", "z_datum")
+_FR_ALIASES = ("fr", "Fr", "FR", "froude", "Froude")
 
 _KIND_PRIORITY = {
     "WALL": 6,
     "Q": 5,
     "W": 5,
+    "FROUDE": 4,
     "CULVERT": 3,
     "ROAD": 2,
     "NONE": 0,
@@ -67,6 +69,7 @@ class SpecialEdgeFeature:
     B: float | None = None
     z_mode: str = "absolute"
     cover: float | None = None
+    fr: float | None = None
 
 
 def split_line_at_vertices(line: LineString) -> list[LineString]:
@@ -166,6 +169,7 @@ def _features_from_gdf(
     col_cover = _find_column(columns, se.field_cover, _COVER_ALIASES)
     col_qg = _find_column(columns, se.field_qgroup, _QGROUP_ALIASES)
     col_zm = _find_column(columns, se.field_z_mode, _ZMODE_ALIASES)
+    col_fr = _find_column(columns, se.field_fr, _FR_ALIASES)
     default_mode = parse_z_mode(se.z_mode)
 
     if fixed_kind is None and col_kind is None:
@@ -203,6 +207,7 @@ def _features_from_gdf(
                     B=_optional_float(row[col_b]) if col_b else None,
                     z_mode=z_mode,
                     cover=_optional_float(row[col_cover]) if col_cover else None,
+                    fr=_optional_float(row[col_fr]) if col_fr else None,
                 )
             )
     return features
@@ -445,6 +450,7 @@ def match_special_edges(
     z_road = np.empty(n, dtype=np.float64)
     qgroup = np.empty(n, dtype=np.int32)
     B = np.empty(n, dtype=np.float64)
+    fr = np.zeros(n, dtype=np.float64)
     for j, (eid, (i, feat, _d)) in enumerate(items):
         crest = float(tables.edges.z_crest[i])
         h_val = float(feat.H) if feat.H is not None else 0.0
@@ -465,7 +471,8 @@ def match_special_edges(
         z_road[j] = zr_val
         qgroup[j] = int(feat.qgroup)
         B[j] = float(feat.B) if feat.B is not None else 0.0
-    return SpecialEdgeTable(edge_id, kind, zc, H, z_road, qgroup, B)
+        fr[j] = float(feat.fr) if feat.fr is not None else 0.0
+    return SpecialEdgeTable(edge_id, kind, zc, H, z_road, qgroup, B, fr)
 
 
 def special_edges_for_mesh(

@@ -15,6 +15,7 @@ import numpy as np
 from .mesh_tables import EdgeTable, FaceTable, NodeTable, NormalizedMesh
 
 MAGIC = b"AQWAMESH"
+BLK_MAGIC = b"AQWABLK1"
 VERSION = 1
 N_SECTIONS = 9
 HASH_LEN = 16
@@ -35,6 +36,8 @@ KIND_CULVERT = 2
 KIND_Q = 4
 KIND_W = 5
 KIND_WALL = 6
+KIND_FROUDE = 7
+DEFAULT_BOUNDARY_FR = 0.35
 
 KIND_BY_NAME = {
     "NONE": KIND_NONE,
@@ -43,11 +46,13 @@ KIND_BY_NAME = {
     "Q": KIND_Q,
     "W": KIND_W,
     "WALL": KIND_WALL,
+    "FROUDE": KIND_FROUDE,
 }
 KIND_NAME = {v: k for k, v in KIND_BY_NAME.items()}
 
 _NODE_REC = struct.Struct("<iddd")
-_EDGE_REC = struct.Struct("<iiiiid")
+_EDGE_REC = struct.Struct("<iiiiid")       # 旧 28 B
+_EDGE_REC_FR = struct.Struct("<iiiiidd")  # + fr
 _FACE_HEAD = struct.Struct("<iiddddi")
 _SPARSE3 = struct.Struct("<iid")       # face_id, code, area
 _BUILDING = struct.Struct("<idd")      # face_id, chi, peri
@@ -113,6 +118,7 @@ class SpecialEdgeTable:
     z_road: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
     qgroup: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
     B: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    fr: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
     def __len__(self) -> int:
         return int(len(self.edge_id))
@@ -158,11 +164,13 @@ def encode_nodes(nodes: NodeTable) -> bytes:
 
 
 def encode_edges(edges: EdgeTable) -> bytes:
+    fr = edges.froude() if hasattr(edges, "froude") else np.zeros(len(edges))
     buf = bytearray()
     for i in range(len(edges)):
-        buf.extend(_EDGE_REC.pack(
+        buf.extend(_EDGE_REC_FR.pack(
             int(edges.id[i]), int(edges.v1[i]), int(edges.v2[i]),
-            int(edges.face_left[i]), int(edges.face_right[i]), float(edges.z_crest[i]),
+            int(edges.face_left[i]), int(edges.face_right[i]),
+            float(edges.z_crest[i]), float(fr[i]),
         ))
     return bytes(buf)
 
@@ -256,20 +264,45 @@ def decode_nodes(payload: bytes) -> NodeTable:
     return NodeTable(ids, x, y, z)
 
 
-def decode_edges(payload: bytes) -> EdgeTable:
-    n = len(payload) // _EDGE_REC.size
-    if n * _EDGE_REC.size != len(payload):
-        raise ValueError("edge セクション長がレコードサイズの倍数ではありません")
+def edge_record_size(payload_len: int, nedge: int | None = None) -> int:
+    """辺レコードは 28 B（旧）または 36 B（+fr）。"""
+    if nedge is not None and nedge > 0:
+        if nedge * _EDGE_REC_FR.size == payload_len:
+            return _EDGE_REC_FR.size
+        if nedge * _EDGE_REC.size == payload_len:
+            return _EDGE_REC.size
+        raise ValueError(
+            f"edge セクション長が合いません: nedge={nedge}, payload={payload_len} B"
+        )
+    if payload_len == 0:
+        return _EDGE_REC_FR.size
+    if payload_len % _EDGE_REC_FR.size == 0:
+        return _EDGE_REC_FR.size
+    if payload_len % _EDGE_REC.size == 0:
+        return _EDGE_REC.size
+    raise ValueError("edge セクション長がレコードサイズの倍数ではありません")
+
+
+def decode_edges(payload: bytes, nedge: int | None = None) -> EdgeTable:
+    rec = edge_record_size(len(payload), nedge)
+    n = len(payload) // rec
     ids = np.empty(n, dtype=np.int32)
     v1 = np.empty(n, dtype=np.int32)
     v2 = np.empty(n, dtype=np.int32)
     left = np.empty(n, dtype=np.int32)
     right = np.empty(n, dtype=np.int32)
     zc = np.empty(n)
+    fr = np.zeros(n)
     for i in range(n):
-        rec = _EDGE_REC.unpack_from(payload, i * _EDGE_REC.size)
-        ids[i], v1[i], v2[i], left[i], right[i], zc[i] = rec
-    return EdgeTable(ids, v1, v2, left, right, zc)
+        if rec == _EDGE_REC_FR.size:
+            ids[i], v1[i], v2[i], left[i], right[i], zc[i], fr[i] = (
+                _EDGE_REC_FR.unpack_from(payload, i * rec)
+            )
+        else:
+            ids[i], v1[i], v2[i], left[i], right[i], zc[i] = (
+                _EDGE_REC.unpack_from(payload, i * rec)
+            )
+    return EdgeTable(ids, v1, v2, left, right, zc, fr)
 
 
 def decode_faces(payload: bytes, nface: int) -> FaceTable:
@@ -292,7 +325,10 @@ def decode_faces(payload: bytes, nface: int) -> FaceTable:
         edge_ids.append(np.asarray(struct.unpack("<" + "i" * n, raw), dtype=np.int32))
     if off != len(payload):
         raise ValueError(f"face セクションに余りがあります ({len(payload) - off} B)")
-    return FaceTable(ids, dummy, x, y, A, z_bed, n_sides, edge_ids)
+    return FaceTable(
+        ids, dummy, x, y, A, z_bed, n_sides, edge_ids,
+        block=np.ones(nface, dtype=np.int32),
+    )
 
 
 def decode_sparse(payload: bytes) -> SparseTriple:
@@ -382,7 +418,7 @@ def decode_strc(payload: bytes) -> SpecialEdgeTable:
         raise ValueError(
             f"strc の長さが合いません: nentry={n}, payload={len(payload)} B"
         )
-    return SpecialEdgeTable(edge_id, kind, zc, H, z_road, qgroup, B)
+    return SpecialEdgeTable(edge_id, kind, zc, H, z_road, qgroup, B, np.zeros(n))
 
 
 def decode_couple(payload: bytes) -> CoupleTable:
@@ -422,6 +458,10 @@ _KIND_SYNONYMS = {
     "水位": KIND_W,
     "WALL": KIND_WALL,
     "壁": KIND_WALL,
+    "FROUDE": KIND_FROUDE,
+    "FR": KIND_FROUDE,
+    "FROUDEOUT": KIND_FROUDE,
+    "フルード": KIND_FROUDE,
     "NONE": KIND_NONE,
 }
 
@@ -467,6 +507,76 @@ def parse_kind(value: str) -> int:
     raise ValueError(f"不明な special_edges kind: {value!r}")
 
 
+_CLOSED_EDGE_KINDS = frozenset({KIND_ROAD, KIND_CULVERT, KIND_Q, KIND_W, KIND_WALL})
+
+
+def apply_boundary_froude(
+    edges: EdgeTable,
+    special: SpecialEdgeTable | None = None,
+    couple: CoupleTable | None = None,
+    *,
+    default_fr: float = 0.0,
+) -> EdgeTable:
+    """外周辺の Fr を mesh に載せる。WALL/Q/W/ROAD/CULVERT/連結辺は塗らない。"""
+    n = len(edges)
+    fr = edges.froude()
+    closed = np.zeros(n, dtype=bool)
+    if couple is not None:
+        for eid in np.asarray(couple.edge_id, dtype=np.int32):
+            if 1 <= int(eid) <= n:
+                closed[int(eid) - 1] = True
+    if special is not None and len(special) > 0:
+        spec_fr = (
+            np.asarray(special.fr, dtype=np.float64)
+            if len(special.fr) == len(special)
+            else np.zeros(len(special))
+        )
+        for i in range(len(special)):
+            eid = int(special.edge_id[i])
+            if eid < 1 or eid > n:
+                continue
+            kind = int(special.kind[i])
+            if kind in _CLOSED_EDGE_KINDS:
+                closed[eid - 1] = True
+                continue
+            val = float(spec_fr[i])
+            if kind == KIND_FROUDE and val <= 0.0:
+                val = default_fr if default_fr > 0.0 else DEFAULT_BOUNDARY_FR
+            if val > 0.0:
+                fr[eid - 1] = min(val, 1.0)
+    if default_fr > 0.0:
+        outer = edges.face_right == 0
+        assign = outer & ~closed & (fr <= 0.0)
+        fr[assign] = min(float(default_fr), 1.0)
+    edges.fr = fr
+    return edges
+
+
+def default_fr_from_config(cfg: object | None) -> float:
+    """input.special_edges.default_fr があればそれ、なければ output.default_fr。"""
+    if cfg is None:
+        return 0.0
+
+    def _as_fr(value: object) -> float:
+        try:
+            fr = float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if fr < 0.0:
+            return 0.0
+        if fr > 1.0:
+            return 1.0
+        return fr
+
+    out = getattr(cfg, "output", None)
+    inp = getattr(cfg, "input", None)
+    se = getattr(inp, "special_edges", None) if inp is not None else None
+    se_fr = _as_fr(getattr(se, "default_fr", 0.0) if se is not None else 0.0)
+    if se_fr > 0.0:
+        return se_fr
+    return _as_fr(getattr(out, "default_fr", 0.0) if out is not None else 0.0)
+
+
 def parse_z_mode(value: object, *, default: str = "absolute") -> str:
     """zc / z_road が絶対標高か相対高さか。"""
     if value is None:
@@ -498,8 +608,9 @@ def write_special_edges_csv(path: Path, table: SpecialEdgeTable) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["edge_id", "kind", "zc", "H", "z_road", "qgroup", "B"])
+        w.writerow(["edge_id", "kind", "zc", "H", "z_road", "qgroup", "B", "fr"])
         has_b = len(table.B) == len(table)
+        has_fr = len(table.fr) == len(table)
         for i in range(len(table)):
             w.writerow([
                 int(table.edge_id[i]),
@@ -507,6 +618,7 @@ def write_special_edges_csv(path: Path, table: SpecialEdgeTable) -> None:
                 float(table.zc[i]), float(table.H[i]), float(table.z_road[i]),
                 int(table.qgroup[i]),
                 float(table.B[i]) if has_b else 0.0,
+                float(table.fr[i]) if has_fr else 0.0,
             ])
 
 
@@ -532,6 +644,7 @@ def read_special_edges_csv(path: Path) -> SpecialEdgeTable:
     z_road: list[float] = []
     qgroup: list[int] = []
     B: list[float] = []
+    fr: list[float] = []
     with path.open("r", encoding="utf-8", newline="") as f:
         rows = csv.DictReader(f)
         if rows.fieldnames is None:
@@ -546,6 +659,7 @@ def read_special_edges_csv(path: Path) -> SpecialEdgeTable:
             z_road.append(float(row.get("z_road") or 0.0))
             qgroup.append(int(float(row.get("qgroup") or 0)))
             B.append(float(row.get("B") or 0.0))
+            fr.append(float(row.get("fr") or 0.0))
     if not edge_id:
         return SpecialEdgeTable()
     return SpecialEdgeTable(
@@ -556,6 +670,7 @@ def read_special_edges_csv(path: Path) -> SpecialEdgeTable:
         np.asarray(z_road, dtype=np.float64),
         np.asarray(qgroup, dtype=np.int32),
         np.asarray(B, dtype=np.float64),
+        np.asarray(fr, dtype=np.float64),
     )
 
 
@@ -650,6 +765,41 @@ def building_from_dense(chi: np.ndarray, peri: np.ndarray, atol: float = 0.0) ->
     )
 
 
+def encode_block_trailer(block: np.ndarray) -> bytes:
+    """面ごとの 1 始まり block_id を AQWABLK1 トレーラーにする。"""
+    ids = np.asarray(block, dtype="<i4")
+    if ids.ndim != 1:
+        raise ValueError("block_id は 1 次元配列である必要があります")
+    if len(ids) and np.any(ids < 1):
+        raise ValueError("block_id は 1 以上である必要があります")
+    return BLK_MAGIC + _U32.pack(len(ids)) + ids.tobytes()
+
+
+def decode_block_trailer(data: bytes, nface: int) -> np.ndarray | None:
+    """トレーラーが無ければ None。あれば i32[nface]。"""
+    if len(data) < 12 or data[:8] != BLK_MAGIC:
+        return None
+    n = int(_U32.unpack_from(data, 8)[0])
+    if n != nface:
+        raise ValueError(f"block trailer の面数が一致しません: {n} != {nface}")
+    need = 12 + 4 * n
+    if len(data) < need:
+        raise ValueError("block trailer が短すぎます")
+    ids = np.frombuffer(data[12:need], dtype="<i4").copy()
+    if len(ids) and np.any(ids < 1):
+        raise ValueError("block_id は 1 以上である必要があります")
+    return ids
+
+
+def _section_payload_end(data: bytes) -> int:
+    table_off = 32 + N_SECTIONS * HASH_LEN
+    end = HEADER_SIZE
+    for i in range(N_SECTIONS):
+        offset, length = struct.unpack_from("<QQ", data, table_off + i * 16)
+        end = max(end, int(offset) + int(length))
+    return end
+
+
 def pack_mesh(
     mesh: NormalizedMesh,
     attrs: MeshAttributes | None = None,
@@ -688,7 +838,9 @@ def pack_mesh(
     )
     hash_block = b"".join(h.ljust(HASH_LEN, b"\x00")[:HASH_LEN] for h in hashes)
     table = b"".join(struct.pack("<QQ", o, n) for o, n in offsets)
-    return header + hash_block + table + b"".join(payloads)
+    return header + hash_block + table + b"".join(payloads) + encode_block_trailer(
+        mesh.faces.block_ids()
+    )
 
 
 def unpack_mesh(data: bytes) -> PackedMesh:
@@ -712,7 +864,7 @@ def unpack_mesh(data: bytes) -> PackedMesh:
             sections.append(_read_exact(data, int(offset), int(length)))
 
     nodes = decode_nodes(sections[0])
-    edges = decode_edges(sections[1])
+    edges = decode_edges(sections[1], nedge=int(nedge))
     faces = decode_faces(sections[2], int(nface))
     if len(nodes) != nnode or len(edges) != nedge or len(faces) != nface:
         raise ValueError("ヘッダの個数とセクション内容が一致しません")
@@ -724,6 +876,8 @@ def unpack_mesh(data: bytes) -> PackedMesh:
         special_edges=decode_strc(sections[7]),
         couple=decode_couple(sections[8]),
     )
+    block = decode_block_trailer(data[_section_payload_end(data):], int(nface))
+    faces.block = block if block is not None else np.ones(int(nface), dtype=np.int32)
     return PackedMesh(
         version=version,
         epsg=int(epsg),
