@@ -250,6 +250,13 @@ class MeshConfig:
     # 解析領域から丸ごと削除してしまい、河道が途中で分断される・意図した範囲が
     # 欠損して見える、といった実害が出る。
     narrow_feature_radius: float = 0.0
+    # 面積下限を割る三角形を修復するとき、隣と統合して四角形にしてよいか。
+    # true なら統合を使わず辺の縮約だけで潰し、出力を三角形のみに保つ。
+    #
+    # 外周四角形帯と内部四角形を無効にしても、この統合だけは四角形を作る。
+    # 斐伊川では 38,113 面中 385 個がこれで生まれており、inun2dh の
+    # 三角形専用カーネル（flag_motion_eq_type=4）が読めない原因になっていた。
+    triangles_only: bool = False
 
     def resolved_narrow_feature_radius(self) -> float:
         if self.narrow_feature_radius > 0.0:

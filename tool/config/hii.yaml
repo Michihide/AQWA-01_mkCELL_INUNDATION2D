@@ -32,6 +32,10 @@ mesh:
   global_min_size: 25.0
   global_max_size: 150.0
 
+  # inun2dh の三角形専用カーネル（flag_motion_eq_type=4）向け。
+  # 面積下限を割る三角形を隣と統合して四角形にする修復を止め、辺の縮約だけで潰す。
+  triangles_only: true
+
   boundary_quad_band:
     enabled: false
     method: transfinite

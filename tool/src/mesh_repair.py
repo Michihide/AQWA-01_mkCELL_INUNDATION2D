@@ -392,6 +392,9 @@ def repair_mesh(mesh: Mesh, cfg, max_passes: int = 5) -> tuple[Mesh, RepairStats
     """
     logger = get_logger()
     q = cfg.quality
+    # 三角形のみで出す設定では統合を一切使わない。統合は小三角形 2 個を
+    # 四角形 1 個にする操作なので、必ず四角形が残ってしまう。
+    triangles_only = getattr(cfg.mesh, "triangles_only", False)
     kwargs = dict(
         min_area=cfg.mesh.min_element_area,
         max_aspect_ratio=q.quadrilateral_aspect_ratio_max,
@@ -404,14 +407,17 @@ def repair_mesh(mesh: Mesh, cfg, max_passes: int = 5) -> tuple[Mesh, RepairStats
     for _ in range(max_passes):
         done_before = total.merged_pairs + total.collapsed_edges
 
-        for relaxed in (False, True):
-            for _ in range(max_passes):
-                mesh, stats = merge_small_triangles(mesh, relaxed=relaxed, **kwargs)
-                total.add(stats)
-                if stats.merged_pairs == 0:
-                    break
+        if not triangles_only:
+            for relaxed in (False, True):
+                for _ in range(max_passes):
+                    mesh, stats = merge_small_triangles(mesh, relaxed=relaxed, **kwargs)
+                    total.add(stats)
+                    if stats.merged_pairs == 0:
+                        break
 
-        if total.remaining_undersized:
+        # 統合を飛ばした場合は remaining_undersized がまだ 0 のままなので、
+        # 判定を待たずに縮約へ入る。違反数は collapse_small_triangles が数える。
+        if triangles_only or total.remaining_undersized:
             # 縮約で潰した小三角形の隣に、統合できる相手が新しく現れることがある
             mesh, stats = collapse_small_triangles(mesh, cfg.mesh.min_element_area)
             total.add(stats)
@@ -435,13 +441,14 @@ def repair_mesh(mesh: Mesh, cfg, max_passes: int = 5) -> tuple[Mesh, RepairStats
         live_before = _live_constrained_edges(mesh)
         for _ in range(max_passes):
             done_before = total.merged_pairs + total.collapsed_edges
-            for _ in range(max_passes):
-                mesh, stats = merge_small_triangles(
-                    mesh, relaxed=True, sacrifice_constraints=True, **kwargs
-                )
-                total.add(stats)
-                if stats.merged_pairs == 0:
-                    break
+            if not triangles_only:
+                for _ in range(max_passes):
+                    mesh, stats = merge_small_triangles(
+                        mesh, relaxed=True, sacrifice_constraints=True, **kwargs
+                    )
+                    total.add(stats)
+                    if stats.merged_pairs == 0:
+                        break
             if total.remaining_undersized:
                 mesh, stats = collapse_small_triangles(
                     mesh, cfg.mesh.min_element_area, sacrifice_constraints=True
