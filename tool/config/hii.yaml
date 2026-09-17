@@ -3,9 +3,9 @@
 # 球磨川との差分は入力・CRS・出力先のみ:
 #   - 1 m DEM（地形評価は 5 m 相当に間引き、球磨川 DEM と同じ実効解像度）
 #   - EPSG:6671（平面直角 III 系）
-#   - 解析領域は 1 ポリゴン（約 26.5 km²）なので --blocks は不要
+#   - 解析領域は 19 ポリゴン（計 26.5 km²）。--blocks --workers 10 で並列生成できる
 #
-#   cd tool && nix develop -c python run.py --config config/hii.yaml
+#   cd tool && nix develop -c python run.py --config config/hii.yaml --blocks --workers 10
 
 # --- 入力 ---
 input:
@@ -90,7 +90,7 @@ gmsh:
   verbosity: 0
   num_threads: 1
 
-# --- 氾濫ブロック並列（斐伊川は 1 ポリゴン。明示 --blocks 時のみ使用）---
+# --- 氾濫ブロック並列（明示 --blocks 時のみ使用）---
 parallel:
   enabled: false
   workers: 8
