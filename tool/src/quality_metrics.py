@@ -199,17 +199,39 @@ def element_adjacency(mesh: Mesh) -> np.ndarray:
     頂点だけを共有する要素は隣とみなさない。要素ごとに時間刻みを変えるとき、
     フラックスをやり取りするのは辺を共有する相手だけであるため。
     """
-    owners: dict[tuple[int, int], list[int]] = {}
+    edge_chunks: list[np.ndarray] = []
+    owner_chunks: list[np.ndarray] = []
     offset = 0
     for conn in (mesh.triangles, mesh.quads):
-        m = conn.shape[1] if len(conn) else 0
-        for local, elem in enumerate(conn):
-            for k in range(m):
-                a, b = int(elem[k]), int(elem[(k + 1) % m])
-                owners.setdefault((a, b) if a < b else (b, a), []).append(offset + local)
-        offset += len(conn)
-    pairs = [v for v in owners.values() if len(v) == 2]
-    return np.array(pairs, dtype=np.int64) if pairs else np.zeros((0, 2), dtype=np.int64)
+        n = len(conn)
+        if n == 0:
+            continue
+        m = conn.shape[1]
+        ends = np.stack([conn, np.roll(conn, -1, axis=1)], axis=-1).reshape(-1, 2)
+        edge_chunks.append(np.sort(ends, axis=1))
+        owner_chunks.append(np.repeat(np.arange(offset, offset + n, dtype=np.int64), m))
+        offset += n
+    if not edge_chunks:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    edges = np.vstack(edge_chunks)
+    owners = np.concatenate(owner_chunks)
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    edges = edges[order]
+    owners = owners[order]
+    if len(edges) < 2:
+        return np.zeros((0, 2), dtype=np.int64)
+
+    same = (edges[1:, 0] == edges[:-1, 0]) & (edges[1:, 1] == edges[:-1, 1])
+    new_run = np.empty(len(edges), dtype=bool)
+    new_run[0] = True
+    new_run[1:] = ~same
+    counts = np.bincount(np.cumsum(new_run) - 1)
+    pair_runs = np.flatnonzero(counts == 2)
+    if not len(pair_runs):
+        return np.zeros((0, 2), dtype=np.int64)
+    starts = np.flatnonzero(new_run)[pair_runs]
+    return np.column_stack([owners[starts], owners[starts + 1]])
 
 
 def neighbor_ratio_violations(

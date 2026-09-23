@@ -213,9 +213,14 @@ def _slope_direction_spread(
     counts: np.ndarray,
 ) -> np.ndarray:
     """勾配方向の円周標準偏差 [deg]。勾配の大きさで重み付けする。"""
-    # x は列方向で東正、y は行番号の減少方向が北
-    gy, gx = np.gradient(dem.array.astype(np.float64), dem.px)
-    gy = -gy
+    # DEM は反復中に変わらないので、勾配は格子ごとに 1 回だけ計算する。
+    # x は列方向で東正、y は行番号の減少方向が北。
+    cached = getattr(dem, "_slope_grad", None)
+    if cached is None:
+        gy, gx = np.gradient(dem.array.astype(np.float64), dem.px)
+        cached = (gx, -gy)
+        dem._slope_grad = cached
+    gx, gy = cached
 
     ex = gx[valid]
     ey = gy[valid]

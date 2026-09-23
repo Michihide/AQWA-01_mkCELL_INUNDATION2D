@@ -403,15 +403,18 @@ def prepare_breaklines(
     for band_index, band in enumerate(bands):
         if band.interior is None:
             continue
-        region = band.interior.buffer(-margin)
-        if region.is_empty:
+        surface = _meshed_surface(band)
+        if surface.is_empty:
             continue
 
         for line in merged:
             mid = line.interpolate(0.5, normalized=True)
             layer = origin_layer[int(tree.nearest(mid))]
             strict = layer == SPECIAL_LAYER
-            clip_region = band.interior if strict else region
+            # 帯があるときは Γ1 の内側だけ。リサンプルで内側に入った弦も外す。
+            # 特殊辺は余白では落とさないが、メッシュ外周の外には出さない。
+            base = band.interior if strict else band.interior.buffer(-margin)
+            clip_region = shapely.intersection(base, surface)
             if clip_region is None or clip_region.is_empty:
                 continue
             clipped = shapely.intersection(line, clip_region)
@@ -424,23 +427,27 @@ def prepare_breaklines(
                 simplified = LineString(coords).simplify(
                     bp.simplify_tolerance, preserve_topology=False
                 )
-                coords = _resample(
-                    _dedupe(np.asarray(simplified.coords, dtype=float)), min_spacing
-                )
-                if len(coords) < 2:
-                    continue
-                length = float(np.linalg.norm(np.diff(coords, axis=0), axis=1).sum())
-                if not strict and length < min_length:
-                    continue
-
-                out.lines.append(
-                    PreparedLine(
-                        coords=coords,
-                        layer=layer,
-                        band_index=band_index,
-                        strict=strict,
+                # 簡略化で外周の弦をまたぐことがある。埋め込む前にもう一度切る。
+                refined = shapely.intersection(simplified, clip_region)
+                for refined_piece in _as_linestrings(refined):
+                    coords = _resample(
+                        _dedupe(np.asarray(refined_piece.coords, dtype=float)),
+                        min_spacing,
                     )
-                )
+                    if len(coords) < 2:
+                        continue
+                    length = float(np.linalg.norm(np.diff(coords, axis=0), axis=1).sum())
+                    if not strict and length < min_length:
+                        continue
+
+                    out.lines.append(
+                        PreparedLine(
+                            coords=coords,
+                            layer=layer,
+                            band_index=band_index,
+                            strict=strict,
+                        )
+                    )
 
     # 面積下限を優先する。近接して薄い要素を強制する区間は拘束を諦める。
     clearance = bp.resolved_min_clearance(cfg.mesh.min_element_area, min_spacing)
@@ -542,6 +549,19 @@ def breaklines_to_geodataframe(prepared: PreparedBreaklines, crs):
         geometry=[LineString(ln.coords) for ln in prepared.lines],
         crs=crs,
     )
+
+
+def _meshed_surface(band: PolygonBand) -> Polygon:
+    """Gmsh に渡す、リサンプル済みの外周で囲まれた領域。
+
+    元のポリゴンより内側に弦が引かれる。そこへはみ出した拘束線を埋め込むと、
+    Frontal-Delaunay が面を埋めずに戻る。
+    """
+    holes = [np.asarray(ring.outer) for ring in band.holes]
+    poly = Polygon(np.asarray(band.exterior.outer), holes)
+    if not poly.is_valid:
+        poly = poly.buffer(0)
+    return poly
 
 
 def unconstrained_polygon(band: PolygonBand, margin: float) -> Polygon:

@@ -4,9 +4,10 @@
     -> [メッシュ生成 -> 修復 -> 品質・地形評価 -> サイズ場更新] を反復
     -> 出力
 
-反復は、全基準を満たすか max_iterations に達すると終了する。面積下限 625 m^2
-に達したために解消できない違反は「解消不能」として記録し、反復を止める理由に
-しない（無限に細分化しないため）。
+反復は、全基準を満たすか max_iterations に達すると終了する。面積下限に達した
+ために解消できない違反は「解消不能」として記録し、反復を止める理由にしない。
+面積加重の地形誤差が 2 回続けてほとんど下がらなければ、そこで終える。
+ジオメトリは反復の外で 1 回だけ作り、サイズ場の更新ではメッシュだけ作り直す。
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ from .special_edges import (
     load_special_edge_features,
     special_features_to_breaklines,
 )
-from .mesh_generator import generate_mesh, gmsh_session
+from .mesh_generator import gmsh_session, prepare_geometry, regenerate_mesh
 from .mesh_parser import Mesh, load_mesh_from_msh
 from .mesh_repair import repair_mesh
 from .quality_metrics import (
@@ -264,7 +265,10 @@ def run_pipeline(cfg: Config) -> dict:
                 breaklines,
                 special_features_to_breaklines(special_feats, crs),
             )
-        references = load_reference_layers(cfg, crs, domain)
+        if cfg.features.reference_layers_for_size_field or cfg.output.save_diagnostics:
+            references = load_reference_layers(cfg, crs, domain)
+        else:
+            references = ReferenceLayers()
 
     with stage("外周四角形帯の構築"):
         bands = build_bands(cfg, polys)
@@ -289,6 +293,13 @@ def run_pipeline(cfg: Config) -> dict:
     return summary
 
 
+def _terrain_stalled(previous: float | None, current: float, rel: float = 0.02) -> bool:
+    """面積加重指標が rel 以上良くなっていなければ True。"""
+    if previous is None:
+        return False
+    return current >= previous * (1.0 - rel)
+
+
 def _iterate(
     cfg: Config,
     bands: list[PolygonBand],
@@ -303,77 +314,95 @@ def _iterate(
     mesh: Mesh | None = None
     quality: QualityReport | None = None
     terrain: TerrainReport | None = None
+    prev_rmse: float | None = None
+    prev_spread: float | None = None
+    stall = 0
 
-    for iteration in range(1, cfg.mesh.max_iterations + 1):
-        with gmsh_session(cfg, f"iter{iteration}"):
-            mesh, _, _ = generate_mesh(cfg, bands, size_field, breaklines)
+    with gmsh_session(cfg, "mesh"):
+        tags, _groups = prepare_geometry(bands, breaklines)
+        view_tag: int | None = None
+        field_tag: int | None = None
+        for iteration in range(1, cfg.mesh.max_iterations + 1):
+            mesh, view_tag, field_tag = regenerate_mesh(
+                cfg, tags, size_field, view_tag=view_tag, field_tag=field_tag,
+            )
             mesh, _ = repair_mesh(mesh, cfg)
             quality = evaluate_quality(mesh)
 
-        terrain = compute_terrain_metrics(mesh, dem, cfg)
-        converged, counts = has_converged(mesh, quality, terrain, cfg)
-        unresolved = sum(
-            v for k, v in counts.items() if k != "blocked_by_area_floor"
-        ) - counts["blocked_by_area_floor"]
-        counts.update(
-            summarize_unresolvable(
-                mesh, quality, terrain, size_field, cfg, mesh.element_centroids()
+            terrain = compute_terrain_metrics(mesh, dem, cfg)
+            converged, counts = has_converged(mesh, quality, terrain, cfg)
+            unresolved = sum(
+                v for k, v in counts.items() if k != "blocked_by_area_floor"
+            ) - counts["blocked_by_area_floor"]
+            counts.update(
+                summarize_unresolvable(
+                    mesh, quality, terrain, size_field, cfg, mesh.element_centroids()
+                )
             )
-        )
 
-        is_last = iteration >= cfg.mesh.max_iterations
-        n_refined, n_coarsened = 0, 0
-        if not converged and not is_last:
-            n_refined, n_coarsened, _ = refine_size_field(
-                size_field, mesh, quality, terrain, cfg
+            is_last = iteration >= cfg.mesh.max_iterations
+            n_refined, n_coarsened = 0, 0
+            if not converged and not is_last:
+                n_refined, n_coarsened, _ = refine_size_field(
+                    size_field, mesh, quality, terrain, cfg
+                )
+                if references is not None:
+                    apply_reference_layers_to_size_field(
+                        cfg, size_field, bands, references, count_attempts=False,
+                    )
+
+            area = float(quality.area.sum())
+            rmse_w = float((terrain.plane_fit_rmse * quality.area).sum() / area)
+            spread_w = float((terrain.slope_direction_spread_deg * quality.area).sum() / area)
+            counts["plane_fit_rmse_area_weighted"] = rmse_w
+            counts["slope_spread_area_weighted"] = spread_w
+            if _terrain_stalled(prev_rmse, rmse_w) and _terrain_stalled(prev_spread, spread_w):
+                stall += 1
+            else:
+                stall = 0
+            prev_rmse, prev_spread = rmse_w, spread_w
+
+            step = RefinementStep(
+                iteration=iteration,
+                n_elements=mesh.n_elements,
+                n_triangles=len(mesh.triangles),
+                n_quads=len(mesh.quads),
+                area_min=float(quality.area.min()),
+                n_refined=n_refined,
+                n_coarsened=n_coarsened,
+                n_at_area_floor=int((quality.area <= cfg.mesh.min_element_area * 1.05).sum()),
+                violations=counts,
             )
-            if references is not None:
-                apply_reference_layers_to_size_field(
-                    cfg, size_field, bands, references, count_attempts=False,
+            steps.append(step)
+            log_step(step)
+
+            if cfg.output.save_iteration_meshes:
+                write_mesh_files(
+                    mesh, quality, out_dir / "iterations", f"iter{iteration:02d}",
+                    write_msh=False, write_xdmf=False,
                 )
 
-        counts["plane_fit_rmse_area_weighted"] = float(
-            (terrain.plane_fit_rmse * quality.area).sum() / quality.area.sum()
-        )
-        counts["slope_spread_area_weighted"] = float(
-            (terrain.slope_direction_spread_deg * quality.area).sum() / quality.area.sum()
-        )
-
-        step = RefinementStep(
-            iteration=iteration,
-            n_elements=mesh.n_elements,
-            n_triangles=len(mesh.triangles),
-            n_quads=len(mesh.quads),
-            area_min=float(quality.area.min()),
-            n_refined=n_refined,
-            n_coarsened=n_coarsened,
-            n_at_area_floor=int((quality.area <= cfg.mesh.min_element_area * 1.05).sum()),
-            violations=counts,
-        )
-        steps.append(step)
-        log_step(step)
-
-        if cfg.output.save_iteration_meshes:
-            write_mesh_files(
-                mesh, quality, out_dir / "iterations", f"iter{iteration:02d}",
-                write_msh=False, write_xdmf=False,
-            )
-
-        if converged:
-            logger.info("全基準を満たしたため反復を終了します（反復 %d）", iteration)
-            break
-        if is_last:
-            logger.warning(
-                "max_iterations=%d に達しました。未解消の違反 %d 件が残っています",
-                cfg.mesh.max_iterations, unresolved,
-            )
-            break
-        if n_refined == 0 and n_coarsened == 0:
-            logger.info(
-                "細分化できる要素が無くなったため反復を終了します（反復 %d）。"
-                " 残る違反は面積下限 625 m^2 が律速です", iteration,
-            )
-            break
+            if converged:
+                logger.info("全基準を満たしたため反復を終了します（反復 %d）", iteration)
+                break
+            if is_last:
+                logger.warning(
+                    "max_iterations=%d に達しました。未解消の違反 %d 件が残っています",
+                    cfg.mesh.max_iterations, unresolved,
+                )
+                break
+            if n_refined == 0 and n_coarsened == 0:
+                logger.info(
+                    "細分化できる要素が無くなったため反復を終了します（反復 %d）",
+                    iteration,
+                )
+                break
+            if stall >= 2 and iteration >= 3:
+                logger.info(
+                    "地形誤差が改善しないため反復を終了します（反復 %d, RMSE %.3f m）",
+                    iteration, rmse_w,
+                )
+                break
 
     assert mesh is not None and quality is not None
     return mesh, quality, terrain, steps

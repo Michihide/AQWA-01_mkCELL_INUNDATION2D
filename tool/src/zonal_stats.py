@@ -15,8 +15,10 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from pyproj import CRS, Geod, Transformer
-from rasterio.mask import mask as rio_mask
-from shapely.geometry import Polygon, mapping
+from rasterio.errors import WindowError
+from rasterio.windows import Window, from_bounds
+from shapely import box
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
@@ -90,39 +92,45 @@ def raster_code_areas(
             Path(raster_path).name, pixel_area, rep_x, rep_y,
         )
 
-        n_empty = 0
-        for i, poly in enumerate(polygons):
-            geom = poly
-            if transformer is not None:
-                xs, ys = transformer.transform(*zip(*poly.exterior.coords))
-                geom = Polygon(zip(xs, ys))
-            try:
-                out_image, _ = rio_mask(
-                    src, [mapping(geom)], crop=True, nodata=nodata, all_touched=True,
-                )
-            except ValueError:
-                n_empty += 1
-                continue
-            band = out_image[0]
-            valid = (
-                (band != nodata) & ~np.isnan(band)
-                if np.issubdtype(band.dtype, np.floating)
-                else band != nodata
+        geoms = _polygons_in_raster_crs(polygons, transformer)
+        minx, miny, maxx, maxy = _geom_bounds(geoms)
+        pad = max(abs(src.res[0]), abs(src.res[1]))
+        window = from_bounds(minx - pad, miny - pad, maxx + pad, maxy + pad, src.transform)
+        try:
+            window = window.intersection(Window(0, 0, src.width, src.height))
+        except WindowError:
+            window = Window(0, 0, 0, 0)
+        if window.width <= 0 or window.height <= 0:
+            logger.warning(
+                "%s: %d / %d 要素がラスタと重ならず面積 0 になりました",
+                Path(raster_path).name, len(polygons), len(polygons),
             )
-            if not valid.any():
-                n_empty += 1
-                continue
-            vals = band[valid]
-            vals = (np.rint(vals) if np.issubdtype(vals.dtype, np.floating) else vals).astype(np.int64)
-            in_range = (vals >= min_code) & (vals <= max_code)
-            if not in_range.any():
-                n_empty += 1
-                continue
-            uniq, counts = np.unique(vals[in_range], return_counts=True)
-            for code, count in zip(uniq.tolist(), counts.tolist()):
-                col = code_to_col.get(code)
-                if col is not None:
-                    out[i, col] = count * pixel_area
+            return out
+
+        data = src.read(1, window=window)
+        win_transform = src.window_transform(window)
+        touched = _pixels_touched_by(geoms, data, win_transform, nodata)
+        if touched is None:
+            n_hit = np.zeros(len(polygons), dtype=bool)
+        else:
+            poly_idx, values = touched
+            values = (
+                np.rint(values) if np.issubdtype(values.dtype, np.floating) else values
+            ).astype(np.int64, copy=False)
+            in_range = (values >= min_code) & (values <= max_code)
+            poly_idx = poly_idx[in_range]
+            values = values[in_range]
+            if len(values):
+                lookup = np.full(max_code - min_code + 1, -1, dtype=np.int64)
+                for code, col in code_to_col.items():
+                    lookup[code - min_code] = col
+                cols = lookup[values - min_code]
+                ok = cols >= 0
+                np.add.at(out, (poly_idx[ok], cols[ok]), pixel_area)
+            n_hit = np.zeros(len(polygons), dtype=bool)
+            if len(poly_idx):
+                n_hit[np.unique(poly_idx)] = True
+        n_empty = int((~n_hit).sum())
 
     if n_empty:
         logger.warning(
@@ -130,6 +138,53 @@ def raster_code_areas(
             Path(raster_path).name, n_empty, len(polygons),
         )
     return out
+
+
+def _polygons_in_raster_crs(polygons: list[Polygon], transformer) -> list[Polygon]:
+    if transformer is None:
+        return polygons
+    out = []
+    for poly in polygons:
+        xs, ys = transformer.transform(*zip(*poly.exterior.coords))
+        out.append(Polygon(zip(xs, ys)))
+    return out
+
+
+def _geom_bounds(geoms: list[Polygon]) -> tuple[float, float, float, float]:
+    bounds = np.array([g.bounds for g in geoms], dtype=np.float64)
+    return (
+        float(bounds[:, 0].min()),
+        float(bounds[:, 1].min()),
+        float(bounds[:, 2].max()),
+        float(bounds[:, 3].max()),
+    )
+
+
+def _pixels_touched_by(geoms, data: np.ndarray, transform, nodata):
+    """要素が触れている有効ピクセル (要素番号, コード値)。
+
+    all_touched と同じく、ピクセル矩形と交差する要素を数える。
+    隣り合う要素が同じ境界ピクセルを両方数える点も、要素ごとの mask と同じ。
+    """
+    valid = np.isfinite(data) if np.issubdtype(data.dtype, np.floating) else np.ones(data.shape, dtype=bool)
+    if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
+        valid &= data != nodata
+    rows, cols = np.nonzero(valid)
+    if len(rows) == 0:
+        return None
+
+    x0, y0 = rasterio.transform.xy(transform, rows, cols, offset="ul")
+    x1, y1 = rasterio.transform.xy(transform, rows, cols, offset="lr")
+    x0 = np.asarray(x0, dtype=np.float64)
+    y0 = np.asarray(y0, dtype=np.float64)
+    x1 = np.asarray(x1, dtype=np.float64)
+    y1 = np.asarray(y1, dtype=np.float64)
+    pixels = box(np.minimum(x0, x1), np.minimum(y0, y1), np.maximum(x0, x1), np.maximum(y0, y1))
+    tree = STRtree(geoms)
+    pix_i, poly_i = tree.query(pixels, predicate="intersects")
+    if len(pix_i) == 0:
+        return None
+    return poly_i, data[rows[pix_i], cols[pix_i]]
 
 
 def load_buildings_bbox(

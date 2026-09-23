@@ -38,14 +38,21 @@ def apply_mesh_options(cfg: Config) -> None:
     o("Mesh.RecombineAll", 0)
 
     # サイズは背景場だけで決める。点・曲率・境界からの伝播はすべて切る。
+    # MeshSizeFromParametricPoints を残すと、拘束線上の補間点から
+    # 背景場よりずっと細かいサイズが入り、Frontal-Delaunay が戻らなくなる。
     o("Mesh.MeshSizeExtendFromBoundary", 0)
     o("Mesh.MeshSizeFromPoints", 0)
     o("Mesh.MeshSizeFromCurvature", 0)
+    try:
+        o("Mesh.MeshSizeFromParametricPoints", 0)
+    except Exception:
+        logger = get_logger()
+        logger.debug("Mesh.MeshSizeFromParametricPoints はこの Gmsh にありません")
     o("Mesh.MeshSizeMin", cfg.mesh.global_min_size)
     o("Mesh.MeshSizeMax", cfg.mesh.global_max_size)
 
 
-def set_background_field(size_field: SizeField) -> int:
+def set_background_field(size_field: SizeField) -> tuple[int, int]:
     """サイズ場を Post-processing View 経由で背景メッシュとして設定する。"""
     view = gmsh.view.add("size_field")
     data = size_field.to_view_data()
@@ -55,7 +62,66 @@ def set_background_field(size_field: SizeField) -> int:
     field = gmsh.model.mesh.field.add("PostView")
     gmsh.model.mesh.field.setNumber(field, "ViewTag", view)
     gmsh.model.mesh.field.setAsBackgroundMesh(field)
-    return field
+    return view, field
+
+
+def _drop_background_field(view_tag: int | None, field_tag: int | None) -> None:
+    if field_tag is not None:
+        gmsh.model.mesh.field.remove(field_tag)
+    if view_tag is not None:
+        gmsh.view.remove(view_tag)
+
+
+def prepare_geometry(bands: list[PolygonBand], breaklines=None) -> tuple[GeometryTags, dict[str, int]]:
+    """サイズ場に依らないジオメトリを 1 回だけ作る。"""
+    tags = build_geometry(bands, breaklines)
+    groups = set_physical_groups(tags)
+    return tags, groups
+
+
+def _surface_roles(tags: GeometryTags) -> dict[int, str]:
+    # 帯端の三角形も Transfinite で分割数が決まっており動かせないので帯扱い
+    roles = {s: "quad_boundary" for s in (*tags.band_surfaces, *tags.band_tri_surfaces)}
+    roles.update({s: "interior" for s in tags.interior_surfaces})
+    return roles
+
+
+def regenerate_mesh(
+    cfg: Config,
+    tags: GeometryTags,
+    size_field: SizeField,
+    *,
+    view_tag: int | None = None,
+    field_tag: int | None = None,
+) -> tuple[Mesh, int, int]:
+    """既存ジオメトリのメッシュだけをサイズ場で作り直す。"""
+    logger = get_logger()
+    # モデル全体の mesh.clear() は背景場の内部状態まで捨て、次の
+    # Frontal-Delaunay がサイズ下限まで切り続けて戻らなくなる。
+    # 面のメッシュだけ捨てて、同じジオメトリで作り直す。
+    _drop_background_field(view_tag, field_tag)
+    surfaces = gmsh.model.getEntities(2)
+    if surfaces:
+        gmsh.model.mesh.clear(surfaces)
+    apply_mesh_options(cfg)
+    view, field = set_background_field(size_field)
+
+    logger.info("Gmsh 2D 生成を開始（algorithm=%d）", cfg.gmsh.algorithm_2d)
+    gmsh.model.mesh.generate(2)
+    logger.info("Gmsh 2D 生成が完了")
+    optimize_mesh(cfg)
+
+    mesh = extract_mesh(_surface_roles(tags), tags.all_breakline_curves())
+    if mesh.n_elements == 0:
+        raise RuntimeError(
+            "Gmsh が 2 次元要素を作りませんでした。"
+            "拘束線がリサンプルした外周を横切ると、面が空のまま戻ります"
+        )
+    logger.info(
+        "メッシュ生成: 節点 %d, 三角形 %d, 四角形 %d (合計 %d 要素)",
+        mesh.n_nodes, len(mesh.triangles), len(mesh.quads), mesh.n_elements,
+    )
+    return mesh, view, field
 
 
 def optimize_mesh(cfg: Config) -> None:
@@ -80,25 +146,6 @@ def generate_mesh(
     breaklines=None,
 ) -> tuple[Mesh, GeometryTags, dict[str, int]]:
     """ジオメトリ構築からメッシュ生成までを 1 回分実行する。"""
-    logger = get_logger()
-
-    tags = build_geometry(bands, breaklines)
-    groups = set_physical_groups(tags)
-    apply_mesh_options(cfg)
-    set_background_field(size_field)
-
-    logger.info("Gmsh 2D 生成を開始（algorithm=%d）", cfg.gmsh.algorithm_2d)
-    gmsh.model.mesh.generate(2)
-    logger.info("Gmsh 2D 生成が完了")
-    optimize_mesh(cfg)
-
-    # 帯端の三角形も Transfinite で分割数が決まっており動かせないので帯扱い
-    roles = {s: "quad_boundary" for s in (*tags.band_surfaces, *tags.band_tri_surfaces)}
-    roles.update({s: "interior" for s in tags.interior_surfaces})
-    mesh = extract_mesh(roles, tags.all_breakline_curves())
-
-    logger.info(
-        "メッシュ生成: 節点 %d, 三角形 %d, 四角形 %d (合計 %d 要素)",
-        mesh.n_nodes, len(mesh.triangles), len(mesh.quads), mesh.n_elements,
-    )
+    tags, groups = prepare_geometry(bands, breaklines)
+    mesh, _, _ = regenerate_mesh(cfg, tags, size_field)
     return mesh, tags, groups

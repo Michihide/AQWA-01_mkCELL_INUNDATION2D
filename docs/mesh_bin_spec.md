@@ -188,6 +188,22 @@ edge_id,river_link,kp,bank
 `--blocks` ではディレクトリ `block_NNN` の `NNN+1`。単一ポリゴンなら 1。
 GIS の `face.csv` / `face.gpkg` にも同じ `block` 列を書く。
 
+### LTS レベルトレーラー（任意）
+
+`AQWABLK1` の直後。mkMESH が `output.cell_bin.lts` を有効にしたとき付与する。
+
+| フィールド | 型 | 内容 |
+|---|---|---|
+| magic | 8 B | `AQWALTS1` |
+| version | u32 | 1 |
+| lmax | i32 | 付与時の最大レベル |
+| binning | u32 | 0=log, 1=linear, 2=quantile |
+| nface | u32 | 面数 |
+| level[nface] | i32 | 各面の LTS レベル（0=最細）。隣接差 ≤1 は生成側で平滑済み |
+
+ソルバーは `inun_lts_level_from=mesh` のときこの列を読み、**ランタイムの CFL / ソートは行わない**。
+無い旧 mesh.bin は従来どおりソルバー内幾何フォールバック。
+
 ## ソルバーが計算する派生量
 
 点座標と左右面から、旧 cell.bin と同じ定義で次を求める。

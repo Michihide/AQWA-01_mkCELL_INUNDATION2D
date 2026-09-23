@@ -16,6 +16,7 @@ from .mesh_tables import EdgeTable, FaceTable, NodeTable, NormalizedMesh
 
 MAGIC = b"AQWAMESH"
 BLK_MAGIC = b"AQWABLK1"
+LTS_MAGIC = b"AQWALTS1"
 VERSION = 1
 N_SECTIONS = 9
 HASH_LEN = 16
@@ -765,6 +766,44 @@ def building_from_dense(chi: np.ndarray, peri: np.ndarray, atol: float = 0.0) ->
     )
 
 
+def encode_lts_trailer(
+    levels: np.ndarray,
+    lmax: int,
+    binning_code: int,
+) -> bytes:
+    """面ごとの LTS レベル（0=最細）。AQWABLK1 の直後に付ける。"""
+    ids = np.asarray(levels, dtype="<i4")
+    if ids.ndim != 1:
+        raise ValueError("LTS levels は 1 次元配列である必要があります")
+    if len(ids) and np.any(ids < 0):
+        raise ValueError("LTS level は 0 以上である必要があります")
+    return (
+        LTS_MAGIC
+        + struct.pack("<III", 1, int(lmax), int(binning_code))
+        + struct.pack("<I", len(ids))
+        + ids.tobytes()
+    )
+
+
+def decode_lts_trailer(data: bytes, nface: int) -> tuple[np.ndarray, int, int] | None:
+    """トレーラーが無ければ None。あれば (levels, lmax, binning_code)。"""
+    if len(data) < 24 or data[:8] != LTS_MAGIC:
+        return None
+    version, lmax, bin_code = struct.unpack_from("<III", data, 8)
+    if version != 1:
+        raise ValueError(f"未対応の LTS trailer 版: {version}")
+    n = int(struct.unpack_from("<I", data, 20)[0])
+    if n != nface:
+        raise ValueError(f"LTS trailer の面数が一致しません: {n} != {nface}")
+    need = 24 + 4 * n
+    if len(data) < need:
+        raise ValueError("LTS trailer が短すぎます")
+    levels = np.frombuffer(data[24:need], dtype="<i4").copy()
+    if len(levels) and np.any(levels < 0):
+        raise ValueError("LTS level は 0 以上である必要があります")
+    return levels, int(lmax), int(bin_code)
+
+
 def encode_block_trailer(block: np.ndarray) -> bytes:
     """面ごとの 1 始まり block_id を AQWABLK1 トレーラーにする。"""
     ids = np.asarray(block, dtype="<i4")
@@ -806,6 +845,9 @@ def pack_mesh(
     *,
     epsg: int = 0,
     hashes: list[bytes] | None = None,
+    lts_levels: np.ndarray | None = None,
+    lts_lmax: int = 0,
+    lts_binning_code: int = 2,
 ) -> bytes:
     """正規化テーブルを mesh.bin バイト列にする。"""
     attrs = attrs or MeshAttributes()
@@ -838,9 +880,12 @@ def pack_mesh(
     )
     hash_block = b"".join(h.ljust(HASH_LEN, b"\x00")[:HASH_LEN] for h in hashes)
     table = b"".join(struct.pack("<QQ", o, n) for o, n in offsets)
-    return header + hash_block + table + b"".join(payloads) + encode_block_trailer(
+    out = header + hash_block + table + b"".join(payloads) + encode_block_trailer(
         mesh.faces.block_ids()
     )
+    if lts_levels is not None:
+        out += encode_lts_trailer(lts_levels, lts_lmax, lts_binning_code)
+    return out
 
 
 def unpack_mesh(data: bytes) -> PackedMesh:
@@ -876,8 +921,14 @@ def unpack_mesh(data: bytes) -> PackedMesh:
         special_edges=decode_strc(sections[7]),
         couple=decode_couple(sections[8]),
     )
-    block = decode_block_trailer(data[_section_payload_end(data):], int(nface))
+    tail = data[_section_payload_end(data):]
+    block = decode_block_trailer(tail, int(nface))
     faces.block = block if block is not None else np.ones(int(nface), dtype=np.int32)
+    lts_tail_off = 0
+    if block is not None:
+        lts_tail_off = 12 + 4 * int(nface)
+    lts_dec = decode_lts_trailer(tail[lts_tail_off:], int(nface))
+    lts_levels = lts_dec[0] if lts_dec is not None else None
     return PackedMesh(
         version=version,
         epsg=int(epsg),
@@ -948,7 +999,17 @@ def write_mesh_bin(
     *,
     epsg: int = 0,
     hashes: list[bytes] | None = None,
+    lts_levels: np.ndarray | None = None,
+    lts_lmax: int = 0,
+    lts_binning_code: int = 2,
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(pack_mesh(mesh, attrs, epsg=epsg, hashes=hashes))
+    path.write_bytes(
+        pack_mesh(
+            mesh, attrs, epsg=epsg, hashes=hashes,
+            lts_levels=lts_levels,
+            lts_lmax=lts_lmax,
+            lts_binning_code=lts_binning_code,
+        )
+    )
     return path

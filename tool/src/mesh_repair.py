@@ -201,21 +201,29 @@ def _apply_collapse(mesh: Mesh, u: int, v: int, target: np.ndarray) -> Mesh:
     """
     nodes = mesh.nodes.copy()
     nodes[u] = target
-    remap = np.arange(len(nodes), dtype=np.int64)
-    remap[v] = u
 
-    tris = remap[mesh.triangles] if len(mesh.triangles) else mesh.triangles
-    tri_keep = (
-        np.array([len(set(map(int, t))) == 3 for t in tris], dtype=bool)
-        if len(tris) else np.zeros(0, dtype=bool)
-    )
-    new_tris = [tris[tri_keep]] if len(tris) else []
-    new_tri_surf = [mesh.tri_surface[tri_keep]] if len(tris) else []
+    if len(mesh.triangles):
+        # v を含む三角形だけ頂点が変わる。3 頂点が相異なるものだけ残す。
+        tris = mesh.triangles.copy()
+        hit = np.any(tris == v, axis=1)
+        if hit.any():
+            changed = tris[hit]
+            tris[hit] = np.where(changed == v, u, changed)
+        tri_keep = (
+            (tris[:, 0] != tris[:, 1])
+            & (tris[:, 1] != tris[:, 2])
+            & (tris[:, 0] != tris[:, 2])
+        )
+        new_tris = [tris[tri_keep]]
+        new_tri_surf = [mesh.tri_surface[tri_keep]]
+    else:
+        new_tris = []
+        new_tri_surf = []
 
     # v を含む四角形だけが潰れうる。それ以外はそのまま残す。
     if len(mesh.quads):
         affected = (mesh.quads == v).any(axis=1) | (mesh.quads == u).any(axis=1)
-        quads = remap[mesh.quads]
+        quads = np.where(mesh.quads == v, u, mesh.quads)
         keep_quads = [quads[~affected]]
         keep_quad_surf = [mesh.quad_surface[~affected]]
         demoted, demoted_surf = [], []

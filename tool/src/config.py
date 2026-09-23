@@ -324,6 +324,15 @@ class GmshConfig:
 
 
 @dataclass
+class CellBinLtsConfig:
+    """mesh.bin 末尾 AQWALTS1 に書く固定 LTS レベル（ソルバーは読むだけ）。"""
+
+    enabled: bool = True
+    max_level: int = 2
+    binning: str = "quantile"
+
+
+@dataclass
 class CellBinConfig:
     """AQWA-INUNDATION2D ソルバーが読み込む mesh.bin の出力設定。
 
@@ -346,6 +355,7 @@ class CellBinConfig:
     veg_field_cd: str = "Cd"
     veg_field_a: str = "a"
     veg_field_hv: str = "Hv"
+    lts: CellBinLtsConfig = field(default_factory=CellBinLtsConfig)
 
 
 @dataclass
@@ -579,6 +589,13 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("quality の四角形内角は min < max である必要があります")
 
     cb = cfg.output.cell_bin
+    if cb.lts.enabled:
+        if cb.lts.max_level < 0:
+            raise ConfigError("output.cell_bin.lts.max_level は 0 以上です")
+        if cb.lts.binning not in {"log", "linear", "quantile"}:
+            raise ConfigError(
+                "output.cell_bin.lts.binning は log / linear / quantile です"
+            )
     if not 0.0 < cb.building_ratio_max <= 1.0:
         raise ConfigError("output.cell_bin.building_ratio_max は 0 < r <= 1 です")
     if not 0.0 < cb.vegetation_ratio_max <= 1.0:

@@ -15,10 +15,11 @@ input:
   dem: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/DEM1M.tif
   breaklines:
     embankments: ../data/hii_embankments.gpkg
-  # 特殊辺ライン（計算範囲と同時に定め、拘束条件にしてからメッシュを切る）
-  # special_edges:
-  #   file: ../data/hii_special_edges.gpkg
-  #   default_kind: ROAD
+  # 樋門オリフィス。幾何は orifice.gpkg（1 本・1 門）。B=3 m, H=1 m。
+  # kind/B/H を付けたコピーを拘束する。zc 未指定なので辺の地盤天端を使う。
+  special_edges:
+    file: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Mesh/Hii/input_gpkg_tif/orifice_culvert.gpkg
+    default_kind: CULVERT
   reference_layers:
     osm_roads: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/OpenStreetMap/chugoku-latest-free.shp/gis_osm_roads_free_1.shp
 
@@ -26,10 +27,11 @@ input:
 crs:
   target_epsg: 6671
 
-# --- メッシュ（球磨川と同じ）---
+# --- メッシュ ---
+# セル数 ~7–8 万を目標（前回 ~14 万から約 2 倍粗く）。面積下限 200 m²。
 mesh:
   min_element_area: 200.0
-  global_min_size: 25.0
+  global_min_size: 25.2
   global_max_size: 150.0
 
   # inun2dh の三角形専用カーネル（flag_motion_eq_type=4）向け。
@@ -39,6 +41,7 @@ mesh:
   boundary_quad_band:
     enabled: false
     method: transfinite
+    # 境界サンプルを 50 m 以上にすると狭い区間で Gmsh が戻らない。25 m のまま。
     width: 25.0
     target_size: 25.0
     layers: 1
@@ -50,11 +53,12 @@ mesh:
   interior_quads:
     enabled: false
 
-  max_iterations: 8
-  max_refine_attempts: 1
-  refinement_factor: 0.85
+  # 0.60 なら辺長 150 m は 4 回で下限 25.2 m に届く。
+  max_iterations: 6
+  max_refine_attempts: 6
+  refinement_factor: 0.60
   max_neighbor_size_ratio: 2.0
-  size_field_grid: 40.0
+  size_field_grid: 42.0
 
 # --- 地形適合（球磨川と同じ閾値。DEM のみ 5 m 相当に落とす）---
 terrain:
@@ -113,6 +117,10 @@ output:
     enabled: true
     directory: ../../Mesh/Hii
     filename: Hii.bin
+    lts:
+      enabled: true
+      max_level: 2
+      binning: quantile
     landuse_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/Landuse_100m.tif
     landuse_epsg: 6668
     soil_raster: /Users/test/Desktop/AQWA/01_mkMESH_INUN2DH/japan_soil.tif

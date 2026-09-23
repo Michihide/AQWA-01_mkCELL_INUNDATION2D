@@ -10,6 +10,7 @@ from pyproj import CRS
 from .cell_bin_export import LANDUSE_CODES, SOIL_CODES, CellAttributes, compute_cell_attributes
 from .config import Config
 from .io_raster import DemGrid
+from .lts_levels import BINNING_TO_CODE, compute_lts_levels
 from .mesh_bin_io import (
     WORK_FILES,
     MeshAttributes,
@@ -85,10 +86,28 @@ def build_and_write_mesh_bin(
     write_work_files(work_dir, tables, mesh_attrs)
     output_path = out_dir / filename
     hashes = [hash_file(work_dir / name) for name in WORK_FILES]
+    lts_levels = None
+    lts_lmax = 0
+    lts_code = 2
+    if cb.lts.enabled:
+        lts_levels, lts_lmax = compute_lts_levels(
+            tables,
+            max_level=int(cb.lts.max_level),
+            binning=cb.lts.binning,  # type: ignore[arg-type]
+        )
+        lts_code = BINNING_TO_CODE[cb.lts.binning]
+        logger.info(
+            "LTS レベルを mesh.bin に付与: lmax=%d binning=%s",
+            lts_lmax,
+            cb.lts.binning,
+        )
     write_mesh_bin(
         output_path, tables, mesh_attrs,
         epsg=int(crs.to_epsg() or cfg.crs.target_epsg),
         hashes=hashes,
+        lts_levels=lts_levels,
+        lts_lmax=lts_lmax,
+        lts_binning_code=lts_code,
     )
     n_block = int(tables.faces.block.max()) if len(tables.faces) else 1
     logger.info(
