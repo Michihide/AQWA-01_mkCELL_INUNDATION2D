@@ -13,6 +13,7 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point
+from shapely.ops import nearest_points
 from shapely.geometry.base import BaseGeometry
 from shapely.strtree import STRtree
 
@@ -256,9 +257,18 @@ def _pair_relation(a: LineString, b: LineString) -> tuple[str, float]:
     return "gap", float(a.distance(b))
 
 
+def _gap_is_outside_domain(a: LineString, b: LineString, domain: BaseGeometry) -> bool:
+    """最短の隙間が計算範囲の外なら、メッシュ内の要素は割れない。"""
+    p, q = nearest_points(a, b)
+    if p.distance(q) <= 1e-6:
+        return False
+    return LineString([p, q]).intersection(domain).length <= 1e-3
+
+
 def special_edge_proximity_report(
     features: list[SpecialEdgeFeature],
     clearance: float,
+    domain: BaseGeometry | None = None,
 ) -> dict:
     """特殊辺どうしの距離の傾向。clearance 未満の隙間と重なりを衝突とする。"""
     geoms = [f.geom for f in features]
@@ -285,6 +295,8 @@ def special_edge_proximity_report(
             if kind == "overlap":
                 bins["overlap"] += 1
                 conflicts.append((i, j, kind, dist))
+                continue
+            if domain is not None and _gap_is_outside_domain(geom, geoms[j], domain):
                 continue
             shortest = min(shortest, dist)
             if dist < 10.0:
@@ -334,11 +346,12 @@ def log_special_edge_proximity(report: dict) -> None:
 def assert_special_edge_clearance(
     features: list[SpecialEdgeFeature],
     clearance: float,
+    domain: BaseGeometry | None = None,
 ) -> None:
     """線同士が下限より近い／重なるときは傾向を出して止める。"""
     if len(features) < 2:
         return
-    report = special_edge_proximity_report(features, clearance)
+    report = special_edge_proximity_report(features, clearance, domain)
     log_special_edge_proximity(report)
     n_bad = len(report["conflicts"])
     if n_bad == 0:

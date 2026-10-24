@@ -356,6 +356,9 @@ class CellBinConfig:
     veg_field_a: str = "a"
     veg_field_hv: str = "Hv"
     lts: CellBinLtsConfig = field(default_factory=CellBinLtsConfig)
+    # original は生成順（降雨 CSV の列順と一致）。
+    # rcm は面を逆 Cuthill-McKee、辺を隣接面番号順、頂点を最初に使う面の順に詰める。
+    index_order: str = "original"
 
 
 @dataclass
@@ -589,6 +592,10 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("quality の四角形内角は min < max である必要があります")
 
     cb = cfg.output.cell_bin
+    if cb.index_order not in {"original", "rcm"}:
+        raise ConfigError(
+            "output.cell_bin.index_order は original または rcm です"
+        )
     if cb.lts.enabled:
         if cb.lts.max_level < 0:
             raise ConfigError("output.cell_bin.lts.max_level は 0 以上です")

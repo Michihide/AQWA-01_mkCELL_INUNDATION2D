@@ -19,6 +19,7 @@ from .terrain_metrics import TerrainReport
 from .utils import get_logger
 
 _EPS = 1e-10
+_RELIEF_EPS = 1.0e-3
 
 
 @dataclass
@@ -81,6 +82,65 @@ class NormalizedMesh:
     faces: FaceTable
 
 
+def _has_relief(z: np.ndarray) -> bool:
+    finite = np.asarray(z, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return False
+    return float(finite.max() - finite.min()) > _RELIEF_EPS
+
+
+def incident_face_elevation(mesh: Mesh, terrain: TerrainReport) -> np.ndarray:
+    """接する面の代表標高を頂点へ平均する。DEM が届かない頂点の補完。"""
+    z_sum = np.zeros(mesh.n_nodes, dtype=np.float64)
+    w_sum = np.zeros(mesh.n_nodes, dtype=np.float64)
+    elev = np.asarray(terrain.elevation, dtype=np.float64)
+    idx = 0
+    for conn in (mesh.triangles, mesh.quads):
+        for elem in conn:
+            z = elev[idx] if idx < len(elev) else np.nan
+            idx += 1
+            if not np.isfinite(z):
+                continue
+            z_sum[elem] += z
+            w_sum[elem] += 1.0
+    out = np.full(mesh.n_nodes, np.nan, dtype=np.float64)
+    ok = w_sum > 0.0
+    out[ok] = z_sum[ok] / w_sum[ok]
+    return out
+
+
+def vertex_elevations(
+    mesh: Mesh,
+    terrain: TerrainReport,
+    dem: DemGrid | None = None,
+) -> np.ndarray:
+    """頂点標高 [m]。
+
+    2 次元 .msh の z は 0 の平面になる。DEM が取れる頂点は DEM、
+    届かない頂点は標高差のある入力 z、それも無ければ接する面の代表標高。
+    """
+    n = mesh.n_nodes
+    z = np.full(n, np.nan, dtype=np.float64)
+    if dem is not None:
+        sampled = np.asarray(
+            dem.sample(mesh.nodes[:, 0], mesh.nodes[:, 1]), dtype=np.float64,
+        )
+        ok = np.isfinite(sampled)
+        z[ok] = sampled[ok]
+    missing = ~np.isfinite(z)
+    if missing.any() and mesh.node_z is not None and len(mesh.node_z) == n and _has_relief(mesh.node_z):
+        src = np.asarray(mesh.node_z, dtype=np.float64)
+        use = missing & np.isfinite(src)
+        z[use] = src[use]
+        missing = ~np.isfinite(z)
+    if missing.any():
+        avg = incident_face_elevation(mesh, terrain)
+        use = missing & np.isfinite(avg)
+        z[use] = avg[use]
+    return np.where(np.isfinite(z), z, 0.0)
+
+
 def build_normalized_tables(
     mesh: Mesh,
     quality: QualityReport,
@@ -101,7 +161,17 @@ def build_normalized_tables(
             int((~np.isfinite(terrain.elevation)).sum()),
         )
 
-    node_z = mesh.node_z if mesh.node_z is not None else np.zeros(n_node)
+    node_z = vertex_elevations(mesh, terrain, dem)
+    if (
+        mesh.node_z is not None
+        and len(mesh.node_z) == n_node
+        and not _has_relief(mesh.node_z)
+        and _has_relief(node_z)
+    ):
+        logger.info(
+            "頂点標高を DEM から設定しました（入力の z は平面）: %.3f .. %.3f m",
+            float(np.min(node_z)), float(np.max(node_z)),
+        )
     nodes = NodeTable(
         id=np.arange(1, n_node + 1, dtype=np.int32),
         x=np.asarray(mesh.nodes[:, 0], dtype=np.float64),

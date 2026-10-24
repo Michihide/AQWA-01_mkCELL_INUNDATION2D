@@ -14,6 +14,7 @@ from src.mesh_bin_io import (
     MeshAttributes,
     SpecialEdgeTable,
     CoupleTable,
+    SparseTriple,
     VegTable,
     apply_boundary_froude,
     building_from_dense,
@@ -31,7 +32,8 @@ from src.mesh_bin_io import (
 )
 from src.zonal_stats import vegetation_chi_and_params
 from src.mesh_parser import Mesh, orient_ccw
-from src.mesh_tables import build_normalized_tables
+from src.mesh_cache_order import apply_cache_order, permute_rain_csv, reorder_mesh_bin
+from src.mesh_tables import EdgeTable, FaceTable, NodeTable, NormalizedMesh, build_normalized_tables, vertex_elevations
 from src.quality_metrics import QualityReport
 from src.terrain_metrics import TerrainReport
 
@@ -117,6 +119,36 @@ def test_shared_edge_is_written_once():
     assert tables.faces.dummy.tolist() == [0, 0]
     assert tables.faces.z_bed.tolist() == pytest.approx([1.0, 2.0])
     assert tables.faces.A.tolist() == pytest.approx([100.0, 100.0])
+
+
+def test_flat_msh_z_is_replaced_by_dem():
+    """2 次元 .msh の z=0 を頂点標高として書かない。"""
+    mesh = _mesh()
+    assert mesh.node_z is not None
+    assert float(np.ptp(mesh.node_z)) == 0.0
+    dem = _dem()
+    cols = np.arange(dem.width, dtype=np.float32)
+    rows = np.arange(dem.height, dtype=np.float32)
+    dem.array = rows[:, None] * 0.0 + cols[None, :]
+    tables = build_normalized_tables(mesh, _quality(), _terrain(), dem)
+    expected = vertex_elevations(mesh, _terrain(), dem)
+    np.testing.assert_allclose(tables.nodes.z, expected)
+    assert float(np.ptp(tables.nodes.z)) > 1.0
+    # 面の代表標高はそのまま
+    assert tables.faces.z_bed.tolist() == pytest.approx([1.0, 2.0])
+
+
+def test_vertex_z_falls_back_to_face_elevation_without_dem():
+    mesh = _mesh()
+    mesh.node_z = None
+    z = vertex_elevations(mesh, _terrain(), None)
+    # 左面 z=1 の頂点、右面 z=2、共有頂点は平均 1.5
+    assert z[0] == pytest.approx(1.0)
+    assert z[5] == pytest.approx(1.0)
+    assert z[2] == pytest.approx(2.0)
+    assert z[3] == pytest.approx(2.0)
+    assert z[1] == pytest.approx(1.5)
+    assert z[4] == pytest.approx(1.5)
 
 
 def test_pack_roundtrip_and_coords_only_on_nodes(tmp_path):
@@ -335,3 +367,147 @@ def test_apply_boundary_froude_skips_wall_and_inlet():
         default_fr=0.3,
     )
     assert tables.edges.fr[open_eid - 1] == pytest.approx(0.5)
+
+
+def _scrambled_path(n: int = 8) -> tuple[NormalizedMesh, MeshAttributes, np.ndarray]:
+    """直線上の面を、隣同士の番号が離れるように並べる。x は幾何の位置。"""
+    storage = np.array([0, 3, 6, 1, 4, 7, 2, 5], dtype=np.int32)
+    assert storage.size == n
+    x = np.zeros(n, dtype=np.float64)
+    x[storage] = np.arange(n, dtype=np.float64)
+    nedge = n - 1
+    left = np.zeros(nedge, dtype=np.int32)
+    right = np.zeros(nedge, dtype=np.int32)
+    v1 = np.zeros(nedge, dtype=np.int32)
+    v2 = np.zeros(nedge, dtype=np.int32)
+    zc = np.zeros(nedge, dtype=np.float64)
+    fr = np.zeros(nedge, dtype=np.float64)
+    listed: list[list[int]] = [[] for _ in range(n)]
+    for g in range(nedge):
+        a = int(storage[g]) + 1
+        b = int(storage[g + 1]) + 1
+        left[g] = a
+        right[g] = b
+        v1[g] = g + 1
+        v2[g] = g + 2
+        zc[g] = 100.0 + g
+        fr[g] = float(g)
+        listed[a - 1].append(g + 1)
+        listed[b - 1].append(g + 1)
+    nnode = n + 1
+    mesh = NormalizedMesh(
+        nodes=NodeTable(
+            id=np.arange(1, nnode + 1, dtype=np.int32),
+            x=np.arange(nnode, dtype=np.float64),
+            y=np.zeros(nnode),
+            z=np.arange(nnode, dtype=np.float64) * 0.1,
+        ),
+        edges=EdgeTable(
+            id=np.arange(1, nedge + 1, dtype=np.int32),
+            v1=v1, v2=v2, face_left=left, face_right=right, z_crest=zc, fr=fr,
+        ),
+        faces=FaceTable(
+            id=np.arange(1, n + 1, dtype=np.int32),
+            dummy=np.zeros(n, dtype=np.int32),
+            x=x,
+            y=np.zeros(n),
+            A=np.full(n, 10.0),
+            z_bed=x.copy(),
+            n_sides=np.array([len(ids) for ids in listed], dtype=np.int32),
+            edge_ids=[np.asarray(ids, dtype=np.int32) for ids in listed],
+            block=np.where(x < 4.0, 1, 2).astype(np.int32),
+        ),
+    )
+    attrs = MeshAttributes(
+        landuse=SparseTriple(
+            face_id=np.array([int(storage[2]) + 1], dtype=np.int32),
+            code=np.array([50], dtype=np.int32),
+            area=np.array([1.25]),
+        ),
+        special_edges=SpecialEdgeTable(
+            edge_id=np.array([4], dtype=np.int32),
+            kind=np.array([KIND_ROAD], dtype=np.int32),
+            zc=np.array([103.0]),
+            H=np.array([1.0]),
+            z_road=np.array([0.2]),
+            qgroup=np.array([8], dtype=np.int32),
+            B=np.array([3.0]),
+            fr=np.array([0.4]),
+        ),
+        couple=CoupleTable(
+            edge_id=np.array([4], dtype=np.int32),
+            river_link=np.array([7], dtype=np.int32),
+            kp=np.array([1.5]),
+            bank=np.array([1], dtype=np.int32),
+        ),
+    )
+    return mesh, attrs, storage
+
+
+def test_rcm_packs_a_path_and_keeps_attributes():
+    mesh, attrs, _storage = _scrambled_path()
+    before_left = mesh.edges.face_left.copy()
+    packed, new_attrs, perm = apply_cache_order(mesh, attrs)
+
+    np.testing.assert_array_equal(mesh.edges.face_left, before_left)
+    both = packed.edges.face_right > 0
+    assert np.all(np.abs(packed.edges.face_left[both] - packed.edges.face_right[both]) == 1)
+    assert perm.span_after < perm.span_before
+
+    ix = int(np.flatnonzero(np.isclose(packed.faces.x, 2.0))[0])
+    assert int(new_attrs.landuse.face_id[0]) == ix + 1
+    assert int(new_attrs.landuse.code[0]) == 50
+    assert new_attrs.landuse.area[0] == pytest.approx(1.25)
+    assert int(packed.faces.block[ix]) == 1
+
+    ie = int(np.flatnonzero(np.isclose(packed.edges.z_crest, 103.0))[0])
+    assert int(new_attrs.special_edges.edge_id[0]) == ie + 1
+    assert int(new_attrs.special_edges.qgroup[0]) == 8
+    assert new_attrs.special_edges.fr[0] == pytest.approx(0.4)
+    assert int(new_attrs.couple.edge_id[0]) == ie + 1
+    assert int(new_attrs.couple.river_link[0]) == 7
+    assert packed.edges.fr[ie] == pytest.approx(3.0)
+    ends = sorted(float(packed.nodes.x[v - 1]) for v in (packed.edges.v1[ie], packed.edges.v2[ie]))
+    assert ends == [3.0, 4.0]
+
+    for i, (left, right) in enumerate(zip(packed.edges.face_left, packed.edges.face_right)):
+        eid = i + 1
+        for face in (int(left), int(right)):
+            assert eid in set(int(e) for e in packed.faces.edge_ids[face - 1])
+
+
+def test_reorder_mesh_bin_moves_lts_with_faces(tmp_path):
+    mesh, attrs, storage = _scrambled_path()
+    levels = np.zeros(len(mesh.faces), dtype=np.int32)
+    levels[storage] = np.arange(len(mesh.faces), dtype=np.int32)
+    src = tmp_path / "in.mesh.bin"
+    dst = tmp_path / "out.mesh.bin"
+    src.write_bytes(pack_mesh(mesh, attrs, epsg=6671, lts_levels=levels, lts_lmax=7, lts_binning_code=2))
+    perm = reorder_mesh_bin(src, dst)
+    packed = unpack_mesh(dst.read_bytes())
+    from src.mesh_cache_order import read_lts_trailer
+
+    lts = read_lts_trailer(dst.read_bytes(), len(packed.mesh.faces))
+    assert lts is not None
+    np.testing.assert_array_equal(lts[0], np.rint(packed.mesh.faces.x).astype(np.int32))
+    assert lts[1] == 7
+    np.testing.assert_array_equal(packed.mesh.faces.x, mesh.faces.x[perm.face_new_to_old])
+    assert (dst.with_name(dst.name + ".face_perm.npy")).is_file()
+
+
+def test_permute_rain_csv_reorders_face_columns(tmp_path):
+    src = tmp_path / "rain.csv"
+    src.write_text(
+        "1967,9,14,17,0,0\n2\n# rtstep[s], rain[mm/h] x 3 faces\n"
+        "0,1.000,2.000,3.000\n3600,4.000,5.000,6.000\n",
+        encoding="utf-8",
+    )
+    dst = tmp_path / "rain_rcm.csv"
+    permute_rain_csv(src, dst, np.array([2, 0, 1], dtype=np.int32))
+    assert dst.read_text(encoding="utf-8").splitlines() == [
+        "1967,9,14,17,0,0",
+        "2",
+        "# rtstep[s], rain[mm/h] x 3 faces",
+        "0,3.000,1.000,2.000",
+        "3600,6.000,4.000,5.000",
+    ]

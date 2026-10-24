@@ -23,6 +23,7 @@ from .mesh_bin_io import (
     write_mesh_bin,
     write_work_files,
 )
+from .mesh_cache_order import align_solver_tables, apply_cache_order
 from .mesh_parser import Mesh
 from .mesh_tables import build_normalized_tables
 from .quality_metrics import QualityReport
@@ -79,6 +80,17 @@ def build_and_write_mesh_bin(
         mesh_attrs.couple,
         default_fr=default_fr_from_config(cfg),
     )
+    if cb.index_order == "rcm":
+        tables, mesh_attrs, perm = apply_cache_order(tables, mesh_attrs)
+        logger.info(
+            "面・辺・頂点番号を詰めました: 内部辺 |L-R| 平均 %.1f -> %.1f、"
+            "辺走査 |ΔL| 平均 %.1f -> %.1f",
+            perm.span_before, perm.span_after, perm.step_before, perm.step_after,
+        )
+        _align_exported_tables(cfg, tables.faces.x, tables.faces.y, perm.face_new_to_old)
+        face_perm = perm.face_new_to_old
+    else:
+        face_perm = None
 
     filename = cb.filename or "mesh.bin"
     out_dir = cfg.cell_bin_dir
@@ -115,4 +127,41 @@ def build_and_write_mesh_bin(
         output_path.name, len(tables.nodes), len(tables.edges),
         len(tables.faces), n_block,
     )
+    if face_perm is not None:
+        perm_path = output_path.with_name(output_path.name + ".face_perm.npy")
+        np.save(perm_path, face_perm)
+        logger.info(
+            "面番号の対応を出力: %s（新しい面 → 古い面、0 始まり）。"
+            "降雨 CSV の列はこの順に並べ替えてください",
+            perm_path.name,
+        )
     return output_path
+
+
+def _align_exported_tables(cfg: Config, face_x, face_y, face_perm: np.ndarray) -> None:
+    """rcm のとき、既存の face/edge 出力の CN を新しい面番号に合わせる。"""
+    if not cfg.output.gpkg_csv.enabled:
+        return
+    logger = get_logger()
+    gc = cfg.output.gpkg_csv
+    directory = cfg.gpkg_csv_dir
+    try:
+        updated = align_solver_tables(
+            directory / gc.face_gpkg,
+            directory / gc.edge_gpkg,
+            face_x,
+            face_y,
+            face_perm,
+            face_csv=directory / gc.face_csv,
+            edge_csv=directory / gc.edge_csv,
+        )
+    except Exception as exc:
+        logger.warning("face/edge の CN は元の番号のままです: %s", exc)
+        return
+    if updated:
+        logger.info("face/edge の CN を詰めた面番号に合わせました")
+    elif (directory / gc.face_gpkg).is_file():
+        logger.warning(
+            "face.gpkg の CN は詰めた面番号と別のままです。"
+            "この mesh.bin の描画には CN を合わせた gpkg が必要です"
+        )

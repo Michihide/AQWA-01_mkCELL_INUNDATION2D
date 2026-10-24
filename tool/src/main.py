@@ -39,6 +39,7 @@ from .breaklines import (
 )
 from .cell_bin_export import compute_cell_attributes
 from .mesh_bin_export import build_and_write_mesh_bin
+from .mesh_tables import vertex_elevations
 from .config import Config, load_config
 from .diagnostics import write_diagnostics
 from .exporters import (
@@ -260,7 +261,7 @@ def run_pipeline(cfg: Config) -> dict:
             bp = cfg.mesh.breakline_processing
             spacing = bp.resolved_min_vertex_spacing(cfg.mesh.global_min_size)
             clearance = bp.resolved_min_clearance(cfg.mesh.min_element_area, spacing)
-            assert_special_edge_clearance(special_feats, clearance)
+            assert_special_edge_clearance(special_feats, clearance, domain)
             breaklines = merge_constraint_breaklines(
                 breaklines,
                 special_features_to_breaklines(special_feats, crs),
@@ -424,7 +425,7 @@ def _write_outputs(
     base = cfg.output.basename
 
     if terrain is not None:
-        mesh.node_z = _node_elevations(mesh, terrain)
+        mesh.node_z = vertex_elevations(mesh, terrain, dem)
 
     write_mesh_files(
         mesh, quality, out_dir, base,
@@ -496,22 +497,6 @@ def _write_outputs(
                     summary["mesh_bin"] = str(bin_path)
 
     return summary
-
-
-def _node_elevations(mesh: Mesh, terrain: TerrainReport) -> np.ndarray:
-    """要素代表標高を節点へ面積按分で配分する。可視化用。"""
-    z_sum = np.zeros(mesh.n_nodes)
-    w_sum = np.zeros(mesh.n_nodes)
-    idx = 0
-    for conn in (mesh.triangles, mesh.quads):
-        for elem in conn:
-            z = terrain.elevation[idx]
-            if np.isfinite(z):
-                z_sum[elem] += z
-                w_sum[elem] += 1.0
-            idx += 1
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(w_sum > 0, z_sum / w_sum, 0.0)
 
 
 def export_solver_outputs(cfg: Config, mesh_path: Path | None = None) -> dict:
